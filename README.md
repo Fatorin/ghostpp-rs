@@ -33,17 +33,21 @@ Actor 間全部以 `mpsc` 訊息傳遞(事件往上、命令往下),沒有共享
 
 ## 建置
 
-需求:Rust(stable)、CMake ≥ 4.1(stormlib-sys 使用;VS2026 需 `cargo update -p cmake`)。
+需求:Rust(stable)、CMake ≥ 4.1(stormlib-sys 用 CMake 編譯內含的 StormLib C++ 原始碼)。
+
+- **Windows**:額外需要 VS2026 建置工具鏈時,需執行 `cargo update -p cmake`(cmake crate 舊版與 VS2026 不相容)。
+- **Linux**:除了 CMake,還需要 C/C++ 編譯工具鏈與 zlib / bzip2 開發套件(StormLib 連結用)。Debian/Ubuntu:
+  ```
+  sudo apt install build-essential cmake zlib1g-dev libbz2-dev
+  ```
+  Fedora/RHEL:
+  ```
+  sudo dnf install gcc-c++ cmake zlib-devel bzip2-devel
+  ```
+- **macOS**:尚未實際驗證,先略過(理論上需要 Xcode command line tools + CMake)。
 
 ```
 cargo build --release
-```
-
-Linux x64(在 Windows 上以 WSL2 交叉建置、不污染 Windows target 快取):
-
-```
-scripts/setup-wsl.sh    # 首次
-scripts/build-linux.sh
 ```
 
 ## 執行前準備

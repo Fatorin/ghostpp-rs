@@ -33,17 +33,21 @@ Actors communicate exclusively via `mpsc` messages (events up, commands down) wi
 
 ## Building
 
-Requirements: Rust (stable), CMake ≥ 4.1 (used by stormlib-sys; VS2026 requires `cargo update -p cmake`).
+Requirements: Rust (stable), CMake ≥ 4.1 (stormlib-sys uses it to build the bundled StormLib C++ source).
+
+- **Windows**: if building with the VS2026 toolchain, also run `cargo update -p cmake` (older versions of the cmake crate aren't compatible with VS2026).
+- **Linux**: besides CMake, you need a C/C++ toolchain and the zlib / bzip2 dev packages (linked by StormLib). Debian/Ubuntu:
+  ```
+  sudo apt install build-essential cmake zlib1g-dev libbz2-dev
+  ```
+  Fedora/RHEL:
+  ```
+  sudo dnf install gcc-c++ cmake zlib-devel bzip2-devel
+  ```
+- **macOS**: not yet verified, skipping for now (likely needs Xcode command line tools + CMake).
 
 ```
 cargo build --release
-```
-
-Linux x64 (cross-built from Windows via WSL2 without polluting the Windows target cache):
-
-```
-scripts/setup-wsl.sh    # first time only
-scripts/build-linux.sh
 ```
 
 ## Runtime setup
