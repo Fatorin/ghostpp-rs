@@ -1,0 +1,299 @@
+#####################
+# BOT CONFIGURATION #
+#####################
+
+### the language file (i18n: catalog of user-visible messages, mirrors C++ language.cfg)
+###  points to a TOML language file: default Traditional Chinese config/language.toml;
+###  to switch to English, just change this line to config/language_en.toml.
+###  if the file is missing or malformed, it falls back to the program's built-in English defaults.
+
+bot_language = "config/language.toml"
+
+### database (Phase 6: admins / bans / game records)
+###  a single db_url; the scheme decides the backend (both built in):
+###    sqlite://ghost.db                      (default; a bare filename also works)
+###    postgres://user:pass@127.0.0.1/ghost
+
+db_url = "sqlite://ghost.db"
+
+### Replay storage (each finished game is automatically saved as .w3g to bot_replaypath)
+###  version reference (taken from GHost's official default.cfg):
+###    1.23: war3version 23, buildnumber 6058
+###    1.24~1.28: war3version 2X, buildnumber 6059
+###    1.29: war3version 29, buildnumber 6060
+
+bot_savereplays = true
+bot_replaypath = "replays"
+replay_war3version = 28
+replay_buildnumber = 6059
+
+### the log file
+
+bot_log = "ghost.log"
+
+### the log method
+###  set this to 1 to leave the log unlocked while GHost++ is running (may be slower, particularly on Windows)
+###  set this to 2 to lock the log while GHost++ is running (may be faster, particularly on Windows)
+###  note: if the log is locked you will not be able to edit/move/delete it while GHost++ is running
+
+bot_logmethod = 1
+
+### the path to your local Warcraft III directory
+###  this path must contain war3.exe, storm.dll, and core.dll
+###  if this path contains War3Patch.mpq the bot will attempt to extract "Scripts\common.j" and "Scripts\blizzard.j" on startup and write them to bot_mapcfgpath (which is defined later in this file)
+###  common.j and blizzard.j are only required for automatically calculating map_crc, you do not need them if your map config files already contain map_crc
+
+bot_war3path = "lib"
+
+### whether to act as Warcraft III: The Frozen Throne or not
+###  set this to 0 to act as Warcraft III: Reign of Chaos (you WILL NOT need to enter a TFT cd key to login to battle.net)
+###  set this to 1 to act as Warcraft III: The Frozen Throne (you WILL need to enter a TFT cd key to login to battle.net)
+
+bot_tft = true
+
+### the address GHost++ will bind to when hosting games (leave it blank to bind to all available addresses)
+###  if you don't know what this is just leave it blank
+
+bot_bindaddress = ""
+
+### the port GHost++ will host games on (this must be different from your admingame_port)
+
+bot_hostport = 6113
+
+### whether to allow GProxy++ reliable reconnects or not
+###  you should ensure that bot_synclimit is set to a reasonable value if you choose to allow GProxy++ reliable reconnects
+###  a reasonable value is 5000 divided by bot_latency, e.g. if bot_latency is 100 use a value of 50 for bot_synclimit
+
+bot_reconnect = true
+
+### the port GHost++ will listen for GProxy++ reliable reconnects on
+
+bot_reconnectport = 6114
+
+### the maximum number of minutes to wait for a GProxy++ client to reconnect to the core
+###  if you set this to 0 or 1 GHost++ will wait for up to 1 minute
+###  if you set this to 10 or more GHost++ will only wait for up to 10 minutes
+###  due to the way GProxy++ works, increasing this value increases bandwidth requirements and CPU requirements on the players' computers
+###  players can always vote to drop a player who is lagging after waiting 45 seconds regardless of this value
+
+bot_reconnectwaittime = 2
+
+### maximum number of games to host at once
+
+bot_maxgames = 5
+
+### command trigger for ingame only (battle.net command triggers are defined later)
+
+bot_commandtrigger = "!"
+
+### the path to the directory where you keep your map config files
+###  this directory can also contain common.j and blizzard.j (extracted from War3Patch.mpq)
+###  common.j and blizzard.j are only required for automatically calculating map_crc, you do not need them if your map config files already contain map_crc
+
+bot_mapcfgpath = "config"
+
+### the path to the directory where you keep your map files
+###  GHost++ doesn't require map files but if it has access to them it can send them to players and automatically calculate most map config values
+###  GHost++ will search [bot_mappath + map_localpath] for the map file (map_localpath is set in each map's config file)
+
+bot_mappath = "maps"
+
+### the bot's virtual host name as it appears in the core lobby
+###  colour codes are defined by the sequence "|cFF" followed by a six character hexadecimal colour in RRGGBB format (e.g. 0000FF for pure blue)
+###  the virtual host name cannot be longer than 15 characters including the colour code, if you try to go over this limit GHost++ will use the default virtual host name
+
+bot_virtualhostname = "|cFF4080C0Fate"
+
+### whether to hide each player's IP address from other players or not
+
+bot_hideipaddresses = false
+
+### whether to check for multiple IP address usage or not
+
+bot_checkmultipleipusage = true
+
+### whether to do automatic spoof checks or not
+###  you can always manually spoof check by whispering the bot (and in fact this is required before running admin commands)
+###  set to 0 to disable automatic spoof checks
+###  set to 1 to enable automatic spoof checks on all players
+###  set to 2 to enable automatic spoof checks on potential admins only
+
+bot_spoofchecks = 2
+
+### whether to require spoof checks or not
+###  this controls whether the bot will require players to spoof check before starting the core
+###  it does NOT control whether the bot will require players to spoof check before running admin commands - spoof checks are ALWAYS required for admin status
+###  if you require spoof checks, players will be kicked from the lobby if they haven't spoof checked within 20 seconds of joining (autohosted games only)
+
+bot_requirespoofchecks = false
+
+### whether to consider admins and root admins as reserved players or not
+###  reserved players are allowed to join full games because another player will be kicked to allow them to join
+
+bot_reserveadmins = false
+
+### whether to display core refresh messages by default
+###  this can always be changed for a particular core with the !refresh command
+
+bot_refreshmessages = false
+
+### whether to automatically lock games when the owner joins
+
+bot_autolock = false
+
+### whether to allow map downloads or not
+###  set to 0 to disable map downloads
+###  set to 1 to enable map downloads
+###  set to 2 to enable conditional map downloads (an admin must start each map download with the !download or !dl command)
+
+bot_allowdownloads = 2
+
+### whether to ping players during map downloads or not
+###  GHost++ will always stop pinging any players who are downloading the map
+###  this config value determines whether GHost++ should stop pinging *all* players when at least one player is downloading the map
+
+bot_pingduringdownloads = 0
+
+### the maximum number of players allowed to download the map at the same time
+
+bot_maxdownloaders = 3
+
+### the maximum combined download speed of all players downloading the map (in KB/sec)
+
+bot_maxdownloadspeed = 10000
+
+### use LC style pings (divide actual pings by two)
+
+bot_lcpings = false
+
+### auto kick players with ping higher than this
+
+bot_autokickping = 9999
+
+### the ban method
+###  if bot_banmethod = 1, GHost++ will automatically reject players using a banned name
+###  if bot_banmethod = 2, GHost++ will automatically reject players using a banned IP address
+###  if bot_banmethod = 3, GHost++ will automatically reject players using a banned name or IP address
+###  if bot_banmethod is anything else GHost++ will print a message when a banned player joins but will not automatically reject them
+
+bot_banmethod = 1
+
+### the IP blacklist file
+
+bot_ipblacklistfile = "ipblacklist.txt"
+
+### automatically close the core lobby if a reserved player (or admin) doesn't join it for this many minutes
+###  games which are set to automatically start when enough players join are exempt from this limit (e.g. autohosted games)
+
+bot_lobbytimelimit = 10
+
+### the core latency (action send interval in ms; !latency can be adjusted live, range 5~500)
+###  the lag screen tolerance has been changed to a fixed "time window" (about 5 seconds), automatically converted based on latency,
+###  so bot_synclimit is no longer needed. In-game you can still use !synclimit to temporarily override it (counted in batches).
+
+bot_latency = 31
+
+### whether votekicks are allowed or not
+
+bot_votekickallowed = 0
+
+### the percentage of players required to vote yes for a votekick to pass
+###  the player starting the votekick is assumed to have voted yes and the player the votekick is started against is assumed to have voted no
+###  the formula for calculating the number of votes needed is votes_needed = ceil( ( num_players - 1 ) * bot_votekickpercentage / 100 )
+###  this means it will round UP the number of votes required
+###  if you set it to 100 it will require 2/3, 3/4, 4/5, 5/6, 6/7, 7/8, 8/9, 9/10, 10/11, and 11/12 votes to pass
+###  if you set it to 90 it will require 2/3, 3/4, 4/5, 5/6, 6/7, 7/8, 8/9, 9/10, 9/11, and 10/12 votes to pass
+###  if you set it to 80 it will require 2/3, 3/4, 4/5, 4/6, 5/7, 6/8, 7/9, 8/10, 8/11, and 9/12 votes to pass
+###  if you set it to 70 it will require 2/3, 3/4, 3/5, 4/6, 5/7, 5/8, 6/9, 7/10, 7/11, and 8/12 votes to pass
+###  if you set it to 60 it will require 2/3, 2/4, 3/5, 3/6, 4/7, 5/8, 5/9, 6/10, 6/11, and 7/12 votes to pass
+
+bot_votekickpercentage = 100
+
+### the default map config (the ".cfg" will be added automatically if you leave it out)
+
+bot_defaultmap = "map.cfg"
+
+### the MOTD file
+###  the first 8 lines of this file will be displayed when a player joins the core
+###  if this file doesn't exist a default MOTD will be used
+
+bot_motdfile = "motd.txt"
+
+### the gameloaded file
+###  the first 8 lines of this file will be displayed when the core finished loading (after the player loading times are displayed)
+
+bot_gameloadedfile = "gameloaded.txt"
+
+### the gameover file
+###  the first 8 lines of this file will be displayed when the core is over
+###  this only works when using a stats class - note: at the time of this writing the only stats class is for DotA maps
+
+bot_gameoverfile = "gameover.txt"
+
+### whether to send "local admin messages" or not
+###  these messages are battle.net chat messages, whispers, and emotes which the bot receives and passes on to the "local admin"
+###  the local admin is the core owner if they are playing from a LAN or the same computer as the bot
+###  this is useful when you are using the admin core to play with one set of CD keys and you want messages sent to the bot to be relayed to you
+###  you can enable or disable this for a particular core with the !messages command
+
+bot_localadminmessages = true
+
+### the "TCP no delay" flag
+###  this controls whether or not your operating system should use the "no delay" algorithm on core sockets
+###  the algorithm is designed to reduce latency by sending data in small packets as soon as possible rather than waiting to send a single larger packet
+###  enabling this algorithm requires additional bandwidth because it is a less efficient way of sending data
+###  however, it may reduce core latencies in some cases
+
+tcp_nodelay = true
+
+### the matchmaking method
+###  this controls how the bot matches players when they join the core when using !autohostmm
+###  set it to 0 to disable matchmaking (first come first served, even if their scores are very different)
+###  set it to 1 to use the "furthest score" method (the player with the furthest score from the average is kicked to make room for another player)
+###  set it to 2 to use the "lowest score" method (the player with the lowest score is kicked to make room for another player)
+
+bot_matchmakingmethod = 1
+
+### the mapgametype overwrite (advance)
+###  This controls the mapgametype overwrite. Use with caution as this can result in an ipban from battle.net services or make users unavailable to join your bot with an invalid number
+###  Example numbers can be found at (http://www.codelain.com/forum/index.php?topic=11373.msg135301#msg135301)
+###  set it to 0 to disable mapgametype overwrite
+
+bot_mapgametype = 0
+
+### the players needed to votestart
+###  this number is used, if a admin, root admin or core owner want to votestart the core
+bot_gamenotstartuntilXplayers = 4
+
+#####################
+# LAN CONFIGURATION #
+#####################
+
+### the Warcraft 3 version to use when broadcasting LAN games
+
+lan_war3version = 28
+
+### the UDP broadcast target
+###  if this value is blank the bot will try to broadcast LAN games on the default interface which is chosen by your operating system
+###  sometimes your operating system will choose the wrong interface when more than one exists
+###  therefore you can use this value to force the bot to use a specific interface
+###  for example you may set it to "192.168.1.255" to broadcast LAN games to the 192.168.1.x subnet
+
+udp_broadcasttarget = ""
+
+### the UDP "don't route" flag
+
+udp_dontroute = 0
+
+##########################
+# AUTOHOST CONFIGURATION #
+##########################
+
+### this section of the config file is for enabling autohost when the bot starts up without having to issue a command
+### you can activate the autohost feature without changing anything here by using the !autohost command
+
+autohost_maxgames = 1
+autohost_startplayers = 12
+autohost_gamename = "Fate"
+autohost_owner = "FateBot1"
+

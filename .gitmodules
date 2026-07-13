@@ -1,0 +1,6 @@
+[submodule "stormlib-rs"]
+	path = stormlib-rs
+	url = https://github.com/Fatorin/stormlib-rs
+[submodule "casclib-rs"]
+	path = casclib-rs
+	url = https://github.com/wc3tools/casclib-rs

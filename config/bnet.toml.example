@@ -1,0 +1,63 @@
+############################
+# BATTLE.NET CONFIGURATION #
+############################
+#
+# Copy this file to config/bnet.toml and fill in your own credentials.
+# config/bnet.toml is gitignored so your real username/password are never committed.
+
+### which battle.net / PVPGN server to connect to (host:port)
+
+bnet_server = "www.fateanother.com:6112"
+
+### the server alias (used to identify the realm in the console and the database)
+
+bnet_serveralias = "FateAnother"
+
+### your Warcraft III CD keys (ROC / TFT). PVPGN servers usually ignore these; leave the FFFF placeholder.
+
+bnet_cdkeyroc = "FFFFFFFFFFFFFFFFFFFFFFFFFF"
+bnet_cdkeytft = "FFFFFFFFFFFFFFFFFFFFFFFFFF"
+
+### locale (decimal LCID; 1033 = English - United States)
+
+bnet_locale = 1033
+
+### your bot's battle.net username and password  <-- FILL THESE IN
+
+bnet_username = "YOUR_BOT_USERNAME"
+bnet_password = "YOUR_BOT_PASSWORD"
+
+### the first channel to join upon entering battle.net
+
+bnet_firstchannel = "Warcraft 3 Frozen Throne"
+
+### root admins for this realm (space separated)
+
+bnet_rootadmin = "YourAdminName"
+
+### command trigger for this battle.net server only
+
+bnet_commandtrigger = "!"
+
+### reserved-list options
+
+bnet_holdfriends = 0
+bnet_holdclan = 0
+
+### allow non-admins to use public commands (!stats etc.)
+
+bnet_publiccommands = true
+
+### BNLS (only needed for official battle.net + Warden; PVPGN can ignore)
+
+bnet_bnlsserver = "localhost"
+bnet_bnlsport = 9367
+bnet_bnlswardencookie = 1
+
+### PVPGN custom values (ask your PVPGN operator)
+
+bnet_custom_war3version = "28"
+bnet_custom_exeversion = "0 5 28 1"
+bnet_custom_exeversionhash = ""
+bnet_custom_passwordhashtype = "pvpgn"
+bnet_custom_pvpgnrealmname = "PvPGN Realm"

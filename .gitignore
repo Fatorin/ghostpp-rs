@@ -1,0 +1,21 @@
+# build output at any level (root + vendored stormlib-rs)
+target/
+.idea/
+error.log
+
+# Secrets: real bnet credentials. Commit config/bnet.toml.example instead.
+/config/bnet.toml
+
+# Warcraft III copyrighted files (not needed to build; supply locally to run/host)
+/lib
+/maps
+
+# Build / diagnostic junk
+*.log
+
+# Runtime artifacts
+/replays
+ghost.db
+
+# Internal agent/dev notes (kept local only, never committed)
+/.claude/
