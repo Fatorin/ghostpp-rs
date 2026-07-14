@@ -21,7 +21,7 @@ pub fn util_encode_ansi(s: &str) -> Vec<u8> {
     s.as_bytes().to_vec()
 }
 
-/// Current time as "YYYY-MM-DD HH:MM:SS" (UTC; used by Phase 6 database records)
+/// Current time as "YYYY-MM-DD HH:MM:SS" (UTC; used by database records)
 pub fn now_datetime_string() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

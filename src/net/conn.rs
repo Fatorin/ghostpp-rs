@@ -1,8 +1,8 @@
-//! Player connection template (ROADMAP §2 PlayerConn).
+//! Player connection template (PlayerConn).
 //!
 //! Each TCP connection is split into two tasks:
 //! - **read task**: `FramedRead` + [`FrameCodec`] deframes → each [`Frame`] is sent as
-//!   [`ConnEvent::Frame`] into the owner's (GameActor / temporarily BotCore in Phase 1) mpsc.
+//!   [`ConnEvent::Frame`] into the owner's (GameActor, or BotCore as fallback) mpsc.
 //!   Receiving no data for 30 seconds is treated as a disconnect (mirrors the 30s timeout in C++ gameplayer.cpp;
 //!   the lobby pings every 5 seconds, and an in-game client sends at least one keepalive per second, so there is always data within 30 seconds).
 //! - **write task**: mpsc receives bytes → `write_all`. The owner merely drops bytes into the channel

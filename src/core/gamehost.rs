@@ -1,4 +1,4 @@
-// [temporarily silenced dead_code] config fields will migrate to bot::BotConfig in Phase 3/4, after which this struct is removed
+// Legacy module kept as a C++ porting reference; superseded by bot::BotCore + bot::BotConfig.
 #![allow(dead_code)]
 
 use std::cell::RefCell;
@@ -257,9 +257,9 @@ impl GameHost {
     }
 
     /// [obsolete] the original 50ms select polling main loop.
-    /// After the tokio migration, replaced by `bot::BotCore::run()` (ROADMAP §2):
+    /// After the tokio migration, replaced by `bot::BotCore::run()`:
     /// each BnetActor / GameActor carries its own timer, so centralized update is no longer needed.
-    /// This struct is kept temporarily as a reference for config fields, to be deleted after the Phase 3/4 migration.
+    /// This struct is kept as a reference for config fields only.
     pub fn update(&mut self) -> bool {
         false
     }
@@ -276,7 +276,7 @@ impl GameHost {
     pub fn input_loop() {
     }
 
-    /// [to be migrated] the game-hosting flow will move to BotCore (ROADMAP §2, Phase 4):
+    /// [superseded] the game-hosting flow lives in BotCore:
     /// BotCore receives !pub/!priv → sends BnetCommand::CreateGame to all BnetActors (broadcast/whisper)
     /// → spawns GameActor → the Listener routes new connections to the lobby GameActor.
     /// The old implementation could not compile due to RefCell/Arc borrow conflicts; for the original logic see C++ ghost.cpp CGHost::CreateGame.
@@ -302,6 +302,6 @@ impl GameHost {
             return;
         }
 
-        todo!("legacy stub: superseded by BotCore + GameActor (see ROADMAP §2/§5)");
+        todo!("legacy stub: superseded by BotCore + GameActor");
     }
 }

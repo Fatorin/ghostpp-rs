@@ -1,7 +1,7 @@
-//! Centralized listener on host_port (ROADMAP §2).
+//! Centralized listener on host_port.
 //!
 //! Unlike the original where "each CBaseGame binds host_port itself": here a single listener accepts,
-//! handing the TcpStream to BotCore for routing (from Phase 4 on, forwarded to the current lobby's GameActor).
+//! handing the TcpStream to BotCore for routing (forwarded to the current lobby's GameActor).
 //! Behavior is equivalent — a game that has started does not accept new connections anyway, and GProxy reconnects use a separate reconnect port.
 
 use std::io;

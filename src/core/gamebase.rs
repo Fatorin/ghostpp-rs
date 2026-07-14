@@ -1,5 +1,5 @@
-// [temporarily silenced] this file is a field/method skeleton of C++ CBaseGame; when rewritten as GameActor in Phase 4/5,
-// each will be implemented one by one and these two allow lines removed (ROADMAP §5)
+// Legacy module: a field/method skeleton of C++ CBaseGame, kept as a porting reference;
+// superseded by game::actor (GameActor).
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
@@ -182,10 +182,10 @@ pub struct GameBase {
 }
 
 impl GameBase {
-    /// [to be migrated] this constructor originally read GameHost config in reverse via `RefCell<Weak<GameHost>>`,
+    /// [superseded] this constructor originally read GameHost config in reverse via `RefCell<Weak<GameHost>>`,
     /// which does not compile in Rust (Weak needs upgrade, and it forms a C++-style back-pointer graph).
-    /// Phase 4 switches to GameActor: the required config (bind_address, reconnect_wait_time, ...)
-    /// is passed in as `GameConfig` construction parameters, and the listener is held centrally by BotCore which routes connections (ROADMAP §2).
+    /// GameActor took over: the required config (bind_address, reconnect_wait_time, ...)
+    /// is passed in as `GameConfig` construction parameters, and the listener is held centrally by BotCore which routes connections.
     /// For the original logic see C++ game_base.cpp CBaseGame::CBaseGame.
     pub fn new(
         game_host: RefCell<Weak<GameHost>>,
@@ -203,7 +203,7 @@ impl GameBase {
         //   wait time of 1 minute = 0 empty actions, 2 minutes = 1, ...)
         let _ = (game_host, map, host_port, game_state, game_name,
                  owner_name, creator_name, creator_server);
-        todo!("legacy stub: superseded by GameActor (see ROADMAP §2/§5)");
+        todo!("legacy stub: superseded by GameActor");
     }
 
     /// Legacy field-initialization content (for porting reference, do not call)

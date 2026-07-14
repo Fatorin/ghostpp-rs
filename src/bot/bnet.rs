@@ -1,10 +1,10 @@
-//! BnetActor: a tokio actor for a single battle.net / PVPGN connection (ROADMAP §2/§3).
+//! BnetActor: a tokio actor for a single battle.net / PVPGN connection.
 //!
 //! Replaces the synchronous 50ms polling of legacy `core::bnet`:
 //! - One `Framed<TcpStream, FrameCodec::bncs()>` reads/writes BNCS packets
 //! - `tokio::select!` concurrently handles: incoming packets, BotCore's commands, the flood-protection send timer, and the 60s NULL
 //! - Reconnects after a disconnect per reconnect_delay (PVPGN 90s / official 240s)
-//! - See ROADMAP §3 for the login state machine
+//! - Login state machine mirrors the C++ bnet.cpp login sequence
 //!
 //! Events go up as `BotEvent::Bnet{server_id, ...}`, commands come down as `BnetCommand`.
 
@@ -387,7 +387,7 @@ impl BnetActor {
                     self.last_out_packet = Instant::now();
                 }
 
-                // Public games refresh every 3 seconds (private games are not refreshed, mirrors ROADMAP §3)
+                // Public games refresh every 3 seconds (private games are not refreshed, mirrors C++ game_base.cpp:550)
                 _ = refresh_tick.tick() => {
                     let is_public = self
                         .advertised

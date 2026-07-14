@@ -1323,7 +1323,7 @@ impl GameActor {
         if let Some(pid) = self.conn_pid.remove(&conn_id) {
             info!("[GAME: {}] pid={pid} connection closed (not a voluntary leave), reason: {reason:?}", self.cfg.game_name);
 
-            // Phase 7b: a GProxy player disconnecting mid-game → retain them, wait for reconnect
+            // A GProxy player disconnecting mid-game → retain them, wait for reconnect
             // (the lag screen triggers naturally because they stop sending keepalives; the timeout is checked by game_tick)
             if self.game_loaded && self.cfg.reconnect_enabled {
                 let keep = self
@@ -2355,7 +2355,7 @@ impl GameActor {
             .await;
     }
 
-    /// Send hub (Phase 7b): all W3GS packets must go through here to reach joined players.
+    /// Send hub: all W3GS packets must go through here to reach joined players.
     /// - Counts total_sent (mirrors C++ CGamePlayer::Send; GPS packets bypass this and are not counted)
     /// - After game_loaded, everything for GProxy players goes into the buffer (resent on reconnect; trimmed by ACK)
     /// - For those disconnected and awaiting reconnect, only buffer, do not actually send

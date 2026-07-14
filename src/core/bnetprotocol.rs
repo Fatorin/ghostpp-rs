@@ -1,5 +1,5 @@
 //! Battle.net (BNCS) protocol encode/decode (mirrors C++ bnetprotocol.cpp).
-//! Phase 3: full implementation of all SEND_/RECEIVE_.
+//! Full implementation of all SEND_/RECEIVE_.
 //!
 //! Packet format: `[0xFF][id][len u16 LE (including the 4-byte header)][payload...]`.
 //! The `data` received by RECEIVE_ is the complete packet including the header (same as C++, parsed with header-inclusive offsets).

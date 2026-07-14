@@ -1,4 +1,4 @@
-//! Packet framing codec (ROADMAP §2 "packet framing").
+//! Packet framing codec.
 //!
 //! Both the BNCS and W3GS wire formats are `[magic:u8][id:u8][len:u16 LE (including the 4-byte header)]`:
 //! - BNCS (battle.net): magic = 0xFF

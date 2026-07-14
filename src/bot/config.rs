@@ -1,4 +1,4 @@
-//! Bot global configuration (ROADMAP §6.5: config values are passed as constructor arguments, no back-pointers stored).
+//! Bot global configuration (config values are passed as constructor arguments, no back-pointers stored).
 //! Mirrors the bot_* settings read by the C++ ghost.cpp CGHost constructor;
 //! replaces the config fields that were mixed into state within `core::gamehost::GameHost`.
 

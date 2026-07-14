@@ -1,5 +1,4 @@
-// [temporarily silenced dead_code] some fields (cdkey, admin refresh time) and handlers are not used until
-// the Phase 3 BnetActor implementation, at which point this is removed
+// Legacy module kept as a C++ porting reference; superseded by bot::bnet (BnetActor).
 #![allow(dead_code)]
 
 use std::{io, usize};

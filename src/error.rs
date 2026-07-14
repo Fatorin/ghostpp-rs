@@ -1,4 +1,4 @@
-//! Project-wide unified error type (ROADMAP Phase 0).
+//! Project-wide unified error type.
 //! Gradually replaces the `io::Error::new(ErrorKind::InvalidData, ...)` scattered everywhere.
 
 use thiserror::Error;

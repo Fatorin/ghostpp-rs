@@ -1,12 +1,9 @@
-//! BotCore: global coordinator (mirrors C++ CGHost, ROADMAP §2).
+//! BotCore: global coordinator (mirrors C++ CGHost).
 //!
-//! Phase 1 skeleton:
 //! - A single `mpsc<BotEvent>` event loop replaces the 50ms select polling
-//! - Takes over player connections coming in from the listener (spawn PlayerConn, log packets)
-//! - console commands: `exit` / `quit` terminate the program
-//!
-//! Phase 3 attaches BnetActor here (HashMap<usize, mpsc::Sender<BnetCommand>>),
-//! Phase 4 attaches GameActor and routes NewConnection to the lobby.
+//! - Routes player connections coming in from the listener to the current lobby's GameActor
+//! - Holds the BnetActor handles (HashMap<usize, mpsc::Sender<BnetCommand>>)
+//! - Command dispatch / permissions / autohost / database live here
 
 pub mod config;
 pub mod bnet;
@@ -51,7 +48,7 @@ struct BnetHandle {
 
 pub struct BotCore {
     cfg: BotConfig,
-    /// The currently loaded map (Phase 4: used for hosting)
+    /// The currently loaded map (used for hosting)
     map: Arc<GameMap>,
     event_rx: mpsc::Receiver<BotEvent>,
     /// The event entry point for listener / console / actor
@@ -61,7 +58,7 @@ pub struct BotCore {
     conns: HashMap<ConnId, ConnHandle>,
     next_conn_id: ConnId,
 
-    /// Phase 3: battle.net / PVPGN connections (indexed by server_id)
+    /// battle.net / PVPGN connections (indexed by server_id)
     bnets: HashMap<usize, BnetHandle>,
 
     /// The game currently in the lobby (single lobby)
@@ -70,13 +67,13 @@ pub struct BotCore {
     games: HashMap<u32, GameHandle>,
     /// Monotonically increasing unique host counter
     host_counter: u32,
-    /// Phase 6: database (admins / bans / games)
+    /// Database (admins / bans / games)
     db: Arc<dyn crate::db::GhostDb>,
-    /// Phase 7a: autohost switch (toggleable at runtime via !autohost off/on; initial value depends on config validity)
+    /// Autohost switch (toggleable at runtime via !autohost off/on; initial value depends on config validity)
     autohost_enabled: bool,
     /// Number of games autohost has created (named "name #N")
     autohost_counter: u32,
-    /// Phase 7b: GProxy reconnect key → host_counter (reconnect routing; cleaned up when a game is deleted)
+    /// GProxy reconnect key → host_counter (reconnect routing; cleaned up when a game is deleted)
     gproxy_keys: HashMap<u32, u32>,
     /// Group B: !disable turns off hosting (including autohost)
     games_disabled: bool,
@@ -118,7 +115,7 @@ impl BotCore {
         (core, event_tx)
     }
 
-    /// Phase 7a: automatically host the next game when conditions are met (mirrors the autohost section of C++ CGHost::Update).
+    /// Automatically host the next game when conditions are met (mirrors the autohost section of C++ CGHost::Update).
     /// Trigger points: login completed, game started (lobby freed up), game deleted.
     async fn try_autohost(&mut self) {
         if self.games_disabled
@@ -465,7 +462,7 @@ impl BotCore {
                     if let Some(join) = GameProtocol::receive_w3gs_reqjoin(&frame.data) {
                         info!(
                             conn = id,
-                            "[GHOST] W3GS_REQJOIN from player [{}] (host_counter={}) - lobby not yet implemented (Phase 4)",
+                            "[GHOST] W3GS_REQJOIN from player [{}] (host_counter={}) - no lobby to route to",
                             join.name,
                             join.host_counter
                         );

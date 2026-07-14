@@ -1,9 +1,6 @@
-//! Inter-actor message types (ROADMAP §2).
+//! Inter-actor message types.
 //! Principle: events go up (XxxEvent → BotEvent → BotCore), commands go down (XxxCommand).
 //! Thoroughly replaces the C++ `m_Game->m_GHost->...` back-pointer chain.
-//!
-//! Some variants (GameCommand, BnetCommand::CreateGame/RefreshGame, the various GameEvent items)
-//! are forward-looking interfaces only constructed in Phase 4/5; the types are defined first, and this allow is removed once the implementation is in place.
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
@@ -28,7 +25,7 @@ pub enum BotEvent {
         last_packet: u32,
     },
 
-    /// Player connection event (temporarily managed by BotCore in Phase 1; moved into GameActor in Phase 4)
+    /// Player connection event (fallback path when no game exists; normally handled inside GameActor)
     Conn(ConnEvent),
 
     /// An event from some battle.net connection (server_id = the index in the config file)
@@ -76,7 +73,7 @@ pub enum BnetCommand {
         map: Arc<GameMap>,
         host_counter: u32,
     },
-    /// Periodic refresh (public game, every 3 seconds while there is an open slot; see ROADMAP §3)
+    /// Periodic refresh (public game, every 3 seconds while there is an open slot)
     RefreshGame {
         game_state: u8,
         game_name: String,

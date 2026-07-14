@@ -1,5 +1,5 @@
 //! bncsutil interface (mirrors C++ CBNCSUtilInterface).
-//! Phase 2/3b: hooked up to the embedded `crate::bncsutil` module.
+//! Hooked up to the embedded `crate::bncsutil` module.
 //!
 //! Used by the PVPGN path:
 //! - `help_sid_auth_check`: compute the 36-byte keyinfo from the ROC/TFT CD key;
@@ -7,7 +7,7 @@
 //! - `help_pvpgn_password_hash`: XSHA1(password) as the proof for SID_AUTH_ACCOUNTLOGONPROOF
 //! - `help_sid_auth_accountlogon`: provide the 32-byte client key (A)
 //!
-//! Not yet ported (only needed by official battle.net, deferred per ROADMAP §4):
+//! Not yet ported (only needed by official battle.net, deferred):
 //! - The real NLS/SRP M1 (`help_sid_auth_accountlogonproof`). PVPGN's pvpgn-hash
 //!   accounts do not verify SRP, so sending a random 32-byte A is enough to log in; official bnet needs full NLS.
 
@@ -181,7 +181,7 @@ impl BNCSUtilInterface {
     /// Official battle.net's SRP M1 (needs NLS, not yet ported).
     /// The PVPGN path never reaches here (uses the pvpgn password hash instead).
     pub fn help_sid_auth_accountlogonproof(&mut self, _salt: &[u8], _server_key: &[u8]) -> bool {
-        // TODO(Phase 3b): port nls.c's SRP-6 M1 computation (needs 256-bit modular exponentiation)
+        // TODO: port nls.c's SRP-6 M1 computation (needs 256-bit modular exponentiation)
         self.m1 = vec![0u8; 20];
         false
     }

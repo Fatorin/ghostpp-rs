@@ -1,8 +1,8 @@
-//! GHost++ Rust — entry point (ROADMAP Phase 1: tokio event loop replaces the 50ms select polling).
+//! GHost++ Rust — entry point (tokio event loop replaces the 50ms select polling).
 //!
-//! See ghostpp-rs/ROADMAP.md §2 for the architecture:
-//!   main → BotCore (event loop) + listener task + console task + BnetActor
-//!   Phase 4/5 adds GameActor.
+//! Architecture:
+//!   main → BotCore (event loop) + listener task + console task
+//!        + BnetActor (per PVPGN connection) + GameActor (per game)
 
 pub mod bncsutil;
 pub mod bot;
@@ -84,7 +84,7 @@ async fn main() -> Result<(), GhostError> {
     // stdin commands (exit / quit / say <msg>)
     let _console = bot::console::spawn(event_tx.clone());
 
-    // Centralized listener on host_port (ROADMAP §2: BotCore routes to the lobby GameActor)
+    // Centralized listener on host_port (BotCore routes to the lobby GameActor)
     let _listener = bot::listener::spawn(
         &core.config().bind_address.clone(),
         core.config().host_port,

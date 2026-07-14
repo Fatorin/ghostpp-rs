@@ -11,7 +11,7 @@ pub struct GameSocket {
     receive_buffer: Vec<u8>,
     pub has_error: bool,
     pub error_code: u8,
-    #[allow(dead_code)] // This struct will be replaced by net::conn (ROADMAP Phase 1)
+    #[allow(dead_code)] // Legacy: superseded by net::conn
     last_recv: u32,
     #[allow(dead_code)]
     last_send: u32,

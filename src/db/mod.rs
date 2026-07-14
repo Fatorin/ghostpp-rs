@@ -1,4 +1,4 @@
-//! Phase 6: database abstraction layer (mirrors the C++ CGHostDB base class + backend subclasses).
+//! Database abstraction layer (mirrors the C++ CGHostDB base class + backend subclasses).
 //!
 //! Design: a domain-method trait (`GhostDb`) + per-backend implementations, with a single `db_url` switching by scheme:
 //! - `sqlite://ghost.db` (default; a bare filename also works): sqlx + SQLite, zero-config single file
