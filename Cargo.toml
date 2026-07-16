@@ -43,3 +43,35 @@ rand = "0.9"
 
 # Note: bncsutil (CD key decoding / XSHA1 / checkRevision) is embedded as the
 # src/bncsutil module — no external crate needed.
+
+# =============================================================================
+# Build profiles
+# =============================================================================
+
+[profile.release]
+# Whole-program optimization across all crates: measurable wins for the hot
+# paths (SHA1/CRC over 70MB maps, zlib replay compression, packet codecs).
+# Costs longer link time — acceptable for a release build.
+lto = "fat"
+# One codegen unit = maximum cross-function optimization (default is 16).
+codegen-units = 1
+opt-level = 3
+# Keep line tables so RUST_BACKTRACE=1 gives readable backtraces from a
+# long-running production bot; only a few MB over a fully stripped binary.
+# (For the absolute smallest binary use: debug = false, strip = "symbols".)
+debug = "line-tables-only"
+strip = "none"
+# Deliberately NOT setting `panic = "abort"`: with unwinding, tokio isolates a
+# panicking task, so a bug in one game cannot take down every hosted game.
+
+[profile.dev]
+# Light optimization for our own code keeps compile times fast while making
+# debug runs responsive.
+opt-level = 1
+
+[profile.dev.package."*"]
+# Fully optimize dependencies even in dev builds: sha1/crc32fast/miniz_oxide
+# run over the entire 70MB map file at startup — unusably slow at -O0
+# (map loading takes ~30s+ in pure debug, ~1s with this). Dependencies rarely
+# change, so this costs almost nothing after the first build.
+opt-level = 3
