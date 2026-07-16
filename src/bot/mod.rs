@@ -253,6 +253,79 @@ impl BotCore {
         }
     }
 
+    /// Search bot_mappath for map files (.w3x/.w3m) whose name contains the pattern
+    /// (case-insensitive; mirrors the C++ !map partial match). Results are sorted.
+    fn find_map_files(&self, pattern: &str) -> Vec<String> {
+        let pattern = pattern.to_lowercase();
+        let dir = if self.cfg.map_path.is_empty() {
+            "maps".to_string()
+        } else {
+            self.cfg.map_path.clone()
+        };
+        let mut found: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let lower = name.to_lowercase();
+                if (lower.ends_with(".w3x") || lower.ends_with(".w3m"))
+                    && lower.contains(&pattern)
+                {
+                    found.push(name);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Load a map file at runtime and swap it in as the current hosting map.
+    /// Heavy work (MPQ parse + SHA1 over the whole file) runs on a blocking thread.
+    /// Existing games keep their own Arc of the old map; only newly hosted games use the new one.
+    async fn load_map_file(&mut self, file: &str) -> String {
+        let map_dir = if self.cfg.map_path.is_empty() {
+            "maps".to_string()
+        } else {
+            self.cfg.map_path.clone()
+        };
+        // Build a minimal map config: the W3 internal path uses the Maps\Download\ convention
+        // (mirrors what C++ !map generates for downloaded maps)
+        let built = ::config::Config::builder()
+            .set_override("bot_mappath", map_dir)
+            .and_then(|b| b.set_override("map_localpath", file.to_string()))
+            .and_then(|b| b.set_override("map_path", format!("Maps\\Download\\{file}")))
+            .map(|b| b.build());
+        let cfg = match built {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) | Err(e) => {
+                warn!("[GHOST] failed to build map config for [{file}]: {e}");
+                return crate::lang::t("map_load_failed", &[("file", file)]);
+            }
+        };
+
+        let loaded = tokio::task::spawn_blocking(move || {
+            let mut m = GameMap::new();
+            m.load(&cfg);
+            m
+        })
+        .await;
+
+        match loaded {
+            Ok(m) if m.is_valid => {
+                info!("[GHOST] map switched to [{}]", m.get_map_path());
+                self.map = Arc::new(m);
+                crate::lang::t("map_loaded", &[("file", file)])
+            }
+            Ok(_) => {
+                warn!("[GHOST] map [{file}] loaded but is not valid");
+                crate::lang::t("map_load_failed", &[("file", file)])
+            }
+            Err(e) => {
+                warn!("[GHOST] map load task failed for [{file}]: {e}");
+                crate::lang::t("map_load_failed", &[("file", file)])
+            }
+        }
+    }
+
     /// Find a game by host_counter (lobby or in progress) and send it a command — in-game commands must be routed back
     /// to that specific game, not to current_game (after a game starts, the lobby may already be autohost's new game)
     async fn send_game_to(&self, host_counter: u32, cmd: GameCommand) {
@@ -884,13 +957,60 @@ impl BotCore {
                 }
             }
             "map" | "load" => {
-                // Report the current map at runtime (switching to a different map file requires reloading config/map.toml, rarely used)
-                let msg = if self.map.is_valid {
-                    crate::lang::t("map_current", &[("path", self.map.get_map_path())])
+                let pattern = payload.trim().to_string();
+                if pattern.is_empty() {
+                    // No pattern: report the current map
+                    let msg = if self.map.is_valid {
+                        crate::lang::t("map_current", &[("path", self.map.get_map_path())])
+                    } else {
+                        crate::lang::t("map_invalid", &[])
+                    };
+                    self.reply_creator(&who, &msg).await;
                 } else {
-                    crate::lang::t("map_invalid", &[])
-                };
-                self.reply_creator(&who, &msg).await;
+                    // Pattern given: search bot_mappath and load on a unique match
+                    // (mirrors the C++ !map partial-match behavior)
+                    let matches = self.find_map_files(&pattern);
+                    match matches.len() {
+                        0 => {
+                            self.reply_creator(
+                                &who,
+                                &crate::lang::t("map_search_none", &[("pattern", &pattern)]),
+                            )
+                            .await;
+                        }
+                        1 => {
+                            let file = matches.into_iter().next().unwrap();
+                            self.reply_creator(
+                                &who,
+                                &crate::lang::t("map_loading", &[("file", &file)]),
+                            )
+                            .await;
+                            let msg = self.load_map_file(&file).await;
+                            self.reply_creator(&who, &msg).await;
+                        }
+                        n => {
+                            // Multiple matches: list the first few
+                            let list = matches
+                                .iter()
+                                .take(5)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            self.reply_creator(
+                                &who,
+                                &crate::lang::t(
+                                    "map_search_multi",
+                                    &[
+                                        ("count", &n.to_string()),
+                                        ("pattern", &pattern),
+                                        ("list", &list),
+                                    ],
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                }
             }
             other => debug!(server_id, "[BNET] unhandled command !{other}"),
         }

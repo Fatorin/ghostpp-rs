@@ -68,7 +68,7 @@
 | `!countbans` | admin | 統計此伺服器的封鎖數量。 |
 | `!dbstatus` | admin | 顯示資料庫後端描述。 |
 | `!channel <name>` | admin | 讓 bot 加入指定頻道。 |
-| `!map`、`!load` | admin | 回報目前載入的地圖路徑(僅回報,不切換地圖)。 |
+| `!map [關鍵字]`、`!load [關鍵字]` | admin | 不帶參數:回報目前地圖。帶關鍵字:在 maps/ 目錄部分比對(不分大小寫)搜尋 .w3x/.w3m —— 唯一符合即載入並切換(之後建的房生效,現有房不受影響);多筆符合列出前 5 筆。 |
 
 ---
 
@@ -208,5 +208,5 @@
 | `!owner` / `!lock` / `!unlock` | 房主鎖定機制未移植(權限改以 spoofcheck + admin 判定)。 |
 | `!stats` / `!statsdota` | W3MMD 統計未完成;指令已列入白名單但目前無回應。 |
 | `!from` 的國別查詢 | GeoIP 未整合,`!from` 只顯示 IP。 |
-| `!reload` | 重載設定 / 地圖未實作(`!map`/`!load` 僅回報目前地圖)。 |
+| `!reload` | 重載設定檔未實作(換地圖請用 `!map <關鍵字>`)。 |
 | `!sendlan` | 區網廣播(UDP)未移植。 |

@@ -73,7 +73,7 @@ Source: `handle_bnet_command` (`src/bot/mod.rs`).
 | `!countbans` | admin | Count bans for this server. |
 | `!dbstatus` | admin | Show the database backend description. |
 | `!channel <name>` | admin | Make the bot join the given channel. |
-| `!map`, `!load` | admin | Report the currently loaded map path (report only; does not switch maps). |
+| `!map [pattern]`, `!load [pattern]` | admin | Without a pattern: report the current map. With a pattern: case-insensitive partial match against .w3x/.w3m files in maps/ — a unique match is loaded and becomes the hosting map (applies to newly hosted games; existing games are unaffected); multiple matches list the first 5. |
 
 ---
 
@@ -216,5 +216,5 @@ This is the local operator console, with **no permission checks**.
 | `!owner` / `!lock` / `!unlock` | Game-owner lock mechanism not ported (authorization is now spoofcheck + admin). |
 | `!stats` / `!statsdota` | W3MMD stats unfinished; the commands are whitelisted but currently return nothing. |
 | `!from` country lookup | GeoIP not integrated; `!from` shows IP only. |
-| `!reload` | Config / map reload not implemented (`!map`/`!load` only report the current map). |
+| `!reload` | Config file reload not implemented (use `!map <pattern>` to switch maps). |
 | `!sendlan` | LAN (UDP) broadcast not ported. |
