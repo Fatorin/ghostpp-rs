@@ -83,15 +83,29 @@ jobs:
         with:
           submodules: recursive
 
+      # +crt-static makes the binary fully static. The explicit --target is
+      # required even though it equals the host triple: it stops cargo from
+      # applying RUSTFLAGS to proc-macros, which cannot be built with a
+      # static CRT.
       - name: Build static musl binary in Alpine container
         run: |
-          docker run --rm -v "$PWD:/work" -w /work rust:alpine sh -ec '
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e RUSTFLAGS="-C target-feature=+crt-static" \
+            rust:alpine sh -ec '
             apk add --no-cache build-base cmake zlib-dev zlib-static bzip2-dev bzip2-static
-            cargo build --release --locked
+            cargo build --release --locked --target aarch64-unknown-linux-musl
           '
 
       - name: Rename binary
-        run: cp target/release/ghostpp-rs ghostpp-rs-linux-arm64-musl
+        run: cp target/aarch64-unknown-linux-musl/release/ghostpp-rs ghostpp-rs-linux-arm64-musl
+
+      - name: Verify binary is fully static
+        run: |
+          if readelf -d ghostpp-rs-linux-arm64-musl | grep -q NEEDED; then
+            echo "::error::Binary has dynamic library dependencies — not fully static"
+            exit 1
+          fi
+          echo "OK: no dynamic dependencies"
 
       - uses: actions/upload-artifact@v4
         with:
