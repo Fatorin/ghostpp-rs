@@ -70,25 +70,25 @@ jobs:
   # so it runs on any ARM64 Linux distribution. The Alpine container is only
   # the build environment — it provides a complete musl C/C++ toolchain and
   # musl-built static zlib/bzip2 out of the box.
+  #
+  # The build runs via `docker run` instead of a job-level `container:`
+  # because JavaScript actions (checkout, upload-artifact, ...) are not
+  # supported inside Alpine containers on ARM64 runners — so those steps
+  # run on the host and only the compile happens inside the container.
   build-linux-arm64-musl:
     name: linux-arm64-musl (static)
     runs-on: ubuntu-24.04-arm
-    container: rust:alpine
     steps:
-      # git must be installed before checkout so submodules can be cloned;
-      # the -static packages are required because musl builds link statically.
-      - name: Install build dependencies
-        shell: sh
-        run: apk add --no-cache bash git build-base cmake zlib-dev zlib-static bzip2-dev bzip2-static
-
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --release --locked
+      - name: Build static musl binary in Alpine container
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work rust:alpine sh -ec '
+            apk add --no-cache build-base cmake zlib-dev zlib-static bzip2-dev bzip2-static
+            cargo build --release --locked
+          '
 
       - name: Rename binary
         run: cp target/release/ghostpp-rs ghostpp-rs-linux-arm64-musl
