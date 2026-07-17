@@ -1,0 +1,106 @@
+name: Release
+
+# Builds release binaries for all supported platforms.
+# Runs automatically on version tags; can be run manually
+# (workflow_dispatch) to verify the pipeline without tagging.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runner: windows-latest
+            bin: target/release/ghostpp-rs.exe
+            artifact: ghostpp-rs-windows-x64.exe
+          - name: macos-arm64
+            runner: macos-latest
+            bin: target/release/ghostpp-rs
+            artifact: ghostpp-rs-macos-arm64
+          - name: linux-x64
+            runner: ubuntu-latest
+            bin: target/release/ghostpp-rs
+            artifact: ghostpp-rs-linux-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install zlib/bzip2 dev libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Rename binary
+        shell: bash
+        run: cp "${{ matrix.bin }}" "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+
+  # ARM64 musl: produces a fully static binary with no runtime dependencies,
+  # so it runs on any ARM64 Linux distribution. The Alpine container is only
+  # the build environment — it provides a complete musl C/C++ toolchain and
+  # musl-built static zlib/bzip2 out of the box.
+  build-linux-arm64-musl:
+    name: linux-arm64-musl (static)
+    runs-on: ubuntu-24.04-arm
+    container: rust:alpine
+    steps:
+      # git must be installed before checkout so submodules can be cloned;
+      # the -static packages are required because musl builds link statically.
+      - name: Install build dependencies
+        shell: sh
+        run: apk add --no-cache bash git build-base cmake zlib-dev zlib-static bzip2-dev bzip2-static
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Rename binary
+        run: cp target/release/ghostpp-rs ghostpp-rs-linux-arm64-musl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghostpp-rs-linux-arm64-musl
+          path: ghostpp-rs-linux-arm64-musl
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ghostpp-rs-linux-arm64-musl
