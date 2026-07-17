@@ -1,212 +1,222 @@
-# ghostpp-rs 指令參考
+# ghostpp-rs Command Reference
 
-本文件由原始碼推導(`src/bot/mod.rs`、`src/game/actor.rs`、`src/bot/bnet.rs`、`src/bot/console.rs`),
-列出 **實際實作** 的指令。與原版 GHost++ 相比刻意未實作的指令列於文末「未實作」小節。
+English | [繁體中文](COMMANDS.zh-TW.md)
 
-## 觸發字元與權限
+This document is derived from the source code (`src/bot/mod.rs`, `src/game/actor.rs`,
+`src/bot/bnet.rs`, `src/bot/console.rs`) and lists the **actually implemented** commands.
+Commands from the original GHost++ that are intentionally not implemented are listed in the
+"Not implemented" section at the end.
 
-- **觸發字元**:預設 `!`。
-  - battle.net 端由各連線的 `bnet_commandtrigger` 決定(預設 `!`)。
-  - 遊戲內由 `bot_commandtrigger` 決定(預設 `!`)。
-- **權限層級**:
-  - **root admin**:設定檔 `bnet_rootadmin`(以空白分隔多個帳號,比對不分大小寫)。
-  - **admin**:root admin,**或** 資料庫管理員(以 `!addadmin` 加入,依「該伺服器(realm)」判定)。
-  - **一般玩家**:兩者皆非。
-- **語法標記**:`<>` 必填、`[]` 選填。
+## Trigger character and permissions
 
-### 遊戲內指令必須先 spoofcheck
+- **Trigger character**: default `!`.
+  - On battle.net it is set per connection via `bnet_commandtrigger` (default `!`).
+  - In game it is set via `bot_commandtrigger` (default `!`).
+- **Permission levels**:
+  - **root admin**: config `bnet_rootadmin` (whitespace-separated accounts, matched case-insensitively).
+  - **admin**: a root admin, **or** a database admin (added with `!addadmin`, scoped to that server/realm).
+  - **regular player**: neither of the above.
+- **Syntax notation**: `<>` required, `[]` optional.
 
-遊戲內(大廳/遊戲中)除少數自查指令外,任何指令都要求發話者:
+### In-game commands require spoofcheck first
 
-1. **通過 spoofcheck**:向 bot 帳號 **密語** `sc`(見「特殊機制」)。密語經 battle.net/PVPGN
-   伺服器認證,名字無法偽造;GProxy++ client 加入遊戲時會自動發送。
-2. spoofcheck 通過後,再以「通過驗證的 realm」比對是否為 root admin 或該 realm 的 db admin。
+In game (lobby or in progress), apart from a few self-query commands, every command requires the sender to:
 
-未 spoofcheck 就下指令 → bot 公開提示需要 spoofcheck;已 spoofcheck 但非 admin → 靜默忽略。
-唯一例外是自查指令 `!checkme` / `!version` / `!stats` / `!statsdota`(免 spoofcheck、免 admin)。
+1. **Pass spoofcheck**: **whisper** `sc` to the bot account (see "Special mechanics"). The whisper is
+   authenticated by the battle.net/PVPGN server, so the name cannot be spoofed; GProxy++ clients send it
+   automatically when joining a game.
+2. Once spoofchecked, the sender's admin status is checked against the **verified realm**
+   (root admin, or a db admin on that realm).
 
----
-
-## 一、battle.net 密語 / 頻道指令
-
-來源:`handle_bnet_command`(`src/bot/mod.rs`)。
-
-> 這些指令 **全部要求 admin**(程式在分派前 `if !is_admin { return; }`)。
-> 標「root」者另外要求 root admin。回覆依原訊息是密語或頻道,以密語或頻道回覆。
-> 其中大廳控制類(open/close/swap/kick/start/latency/synclimit/unhost)作用於 **目前大廳** 的那場遊戲;
-> 進行中的遊戲只能用 `!saygame` / `!saygames` 或遊戲內聊天控制。
-
-| 語法 | 權限 | 說明 |
-|------|------|------|
-| `!addadmin <name>` | root | 將 `<name>` 加為此伺服器的 db admin。已存在 / 失敗會回報。 |
-| `!deladmin <name>` | root | 從此伺服器移除 db admin。 |
-| `!checkadmin <name>` | admin | 查詢 `<name>` 是否為此伺服器的 admin。 |
-| `!addban <name> [reason]`、`!ban <name> [reason]` | admin | 以名稱新增封鎖(記錄下令者、日期、原因;IP 留空)。 |
-| `!delban <name>`、`!unban <name>` | admin | 移除該名稱的封鎖。 |
-| `!checkban <name>` | admin | 查詢封鎖資訊(下令者、日期、原因)。 |
-| `!autohost [on\|off]` | admin | `on` 開啟自動開房(需已設 `auto_host_game_name`)並立即嘗試開房;`off` 關閉;無參數顯示狀態(開關、房名、最大場數、自動開始人數)。 |
-| `!say <text>` | admin | 對 **所有 bnet 頻道** 廣播文字(不是送進遊戲)。 |
-| `!pub <name>` | admin | 建立 **公開** 遊戲(房名長度須 1–31)。 |
-| `!priv <name>` | admin | 建立 **私人** 遊戲(房名長度須 1–31)。 |
-| `!unhost` | admin | 解除目前大廳的遊戲。 |
-| `!open <slot>` | admin | 開放大廳指定 slot(**1-based**,內部轉 0-based)。 |
-| `!close <slot>` | admin | 關閉大廳指定 slot(1-based)。 |
-| `!swap <s1> <s2>` | admin | 交換兩個 slot(1-based;需正好兩個數字)。 |
-| `!kick <name\|slot>` | admin | 踢人:純數字視為 slot 編號(1-based),否則以名稱部分比對(不分大小寫)。 |
-| `!start` | admin | 開始大廳倒數開局。 |
-| `!latency [n]` | admin | 無參數查詢;設定 action 間隔 ms,**clamp 5~500**(見特殊機制)。 |
-| `!synclimit [n]` | admin | 無參數查詢;`n` 為 **落後批次數**(換算成時間窗,見特殊機制)。 |
-| `!exit`、`!quit` | **root** | 回覆關機訊息後觸發整支程式關閉。非 root 會被拒絕。 |
-| `!disable` | admin | 停用建房(含 autohost)。 |
-| `!enable` | admin | 恢復建房並嘗試 autohost。 |
-| `!downloads <0\|1\|2>` | admin | 設定地圖下載模式:`0` 禁用(無圖玩家直接踢)/ `1` 啟用 / `2` 條件。其他值顯示用法。 |
-| `!getgames` | admin | 摘要:大廳(0/1)、進行中場數、最大場數,並列出各房名。 |
-| `!getgame` | admin | 顯示目前大廳遊戲的房名與 host_counter;無則回報無遊戲。 |
-| `!saygames <text>` | admin | 對大廳與 **所有進行中** 遊戲廣播文字。 |
-| `!saygame <host_counter> <text>` | admin | 對指定 host_counter 的那場遊戲廣播文字。 |
-| `!countadmins` | admin | 統計此伺服器的 admin 數量。 |
-| `!countbans` | admin | 統計此伺服器的封鎖數量。 |
-| `!dbstatus` | admin | 顯示資料庫後端描述。 |
-| `!channel <name>` | admin | 讓 bot 加入指定頻道。 |
-| `!map [關鍵字]`、`!load [關鍵字]` | admin | 不帶參數:回報目前地圖。帶關鍵字:在 maps/ 目錄部分比對(不分大小寫)搜尋 .w3x/.w3m —— 唯一符合即載入並切換(之後建的房生效,現有房不受影響);多筆符合列出前 5 筆。 |
+Sending a command without spoofcheck → the bot publicly asks the player to spoofcheck; spoofchecked but
+not an admin → silently ignored. The only exceptions are the self-query commands `!checkme` / `!version` /
+`!stats` / `!statsdota` (no spoofcheck, no admin required).
 
 ---
 
-## 二、遊戲大廳 / 遊戲中指令
+## 1. battle.net whisper / channel commands
 
-來源:`dispatch_lobby_command`(BotCore 端,`src/bot/mod.rs`)+ `handle_admin_command`
-(GameActor 端,`src/game/actor.rs`)。權限見上方「遊戲內指令必須先 spoofcheck」。
+Source: `handle_bnet_command` (`src/bot/mod.rs`).
 
-### 一般玩家可用(免 spoofcheck、免 admin)
+> These commands **all require admin** (the code returns early via `if !is_admin { return; }` before dispatch).
+> Those marked "root" additionally require root admin. Replies go by whisper or channel to match the
+> original message. The lobby-control ones (open/close/swap/kick/start/latency/synclimit/unhost) act on the
+> **current lobby** game; in-progress games can only be controlled via `!saygame` / `!saygames` or in-game chat.
 
-| 語法 | 權限 | 說明 |
-|------|------|------|
-| `!checkme` | 一般玩家 | 私訊回覆自己的資訊:ping、是否 spoofed、realm。 |
-| `!version` | 一般玩家 | 私訊回覆版本字串。 |
-| `!stats` | 一般玩家 | **已列入白名單但無實作**(W3MMD 統計未完成),目前無回應。 |
-| `!statsdota` | 一般玩家 | 同上,無回應。 |
-
-### 需 admin + spoofcheck
-
-由 BotCore 直接處理的大廳控制:
-
-| 語法 | 權限 | 說明 |
-|------|------|------|
-| `!say <text>` | admin | host 身分對全場廣播(大廳 flag 16 / 遊戲中 flag 32)。 |
-| `!open <slot>` | admin | 開放 slot(1-based)。開局後無效。 |
-| `!close <slot>` | admin | 關閉 slot(1-based)。若 slot 有真人會先踢出。 |
-| `!swap <s1> <s2>` | admin | 交換兩個 slot(1-based)。依地圖選項(固定設定/自訂隊伍)決定換法。 |
-| `!kick <name\|slot>` | admin | 踢人:純數字=slot(1-based),否則名稱部分比對。 |
-| `!start` | admin | 開始倒數;若有人仍在下載地圖則拒絕。 |
-| `!latency [n]` | admin | 查詢 / 設定 action 間隔 ms(clamp 5~500)。 |
-| `!synclimit [n]` | admin | 查詢 / 設定 lag 容忍(以批次數輸入,內部存成時間窗)。 |
-| `!unhost` | admin | 解除大廳遊戲。**注意**:實作作用於「目前大廳」而非發話者所在的那場(見不一致清單)。 |
-
-由 GameActor 處理(`handle_admin_command`):
-
-| 語法 | 權限 | 說明 |
-|------|------|------|
-| `!abort`、`!a` | admin | 取消開局倒數;無倒數則私訊提示。 |
-| `!openall` | admin | 開放所有目前為關閉的 slot。 |
-| `!closeall` | admin | 關閉所有目前為開放的 slot。 |
-| `!sp` | admin | 洗牌(將佔用中的真人玩家在各佔用 slot 間隨機重排)。 |
-| `!hold <name> [name...]` | admin | 保留名額:將名字(小寫)加入保留名單,加入時消耗一次。 |
-| `!mute <name>` | admin | 靜音玩家(其訊息不轉發)。名稱部分比對。 |
-| `!unmute <name>` | admin | 解除靜音。 |
-| `!muteall` | admin | 全場靜音:遊戲中僅擋「全體」公開訊息(flag 32 且 mode 0);隊伍 / 私訊仍放行。 |
-| `!unmuteall` | admin | 解除全場靜音。 |
-| `!check [name]` | admin | 私訊回覆玩家資訊(ping、spoofed、realm);省略名稱=查自己。 |
-| `!trigger` | admin | 私訊回覆目前觸發字元(固定回 `!`)。 |
-| `!from` | admin | 列出各玩家的 IP(國別需 GeoIP,未實作,先給 IP)。 |
-| `!ping [n]` | admin | 無參數:私訊列出全體 ping;帶數字 `n`:踢除平均 ping > `n` ms 的玩家。 |
-| `!drop` | admin | 遊戲中且有人 lag 時,踢掉所有 lag 中的玩家;否則私訊提示無 lag。 |
-| `!end` | admin | 強制結束目前這場遊戲。 |
-| `!autostart [n\|off]` | admin | 設定滿 `n` 人自動開始(全員地圖確認才倒數);`off` 或無參數關閉。 |
-| `!announce [秒 訊息 \| off]` | admin | 大廳每 `秒` 廣播一次 `訊息`;`off` 或無參數關閉。 |
-| `!hcl [str]` | admin | 無參數顯示目前 HCL 字串;設定會檢查已開局 / 長度 / 合法字元(見特殊機制)。 |
-| `!clearhcl` | admin | 清空 HCL 字串(已開局則拒絕)。 |
-
-> 其他未列出的字串會被 GameActor 靜默忽略(僅 debug log)。
+| Syntax | Permission | Description |
+|--------|------------|-------------|
+| `!addadmin <name>` | root | Add `<name>` as a db admin for this server. Reports already-exists / failure. |
+| `!deladmin <name>` | root | Remove a db admin from this server. |
+| `!checkadmin <name>` | admin | Check whether `<name>` is an admin on this server. |
+| `!addban <name> [reason]`, `!ban <name> [reason]` | admin | Add a ban by name (records the issuing admin, date, reason; IP left blank). |
+| `!delban <name>`, `!unban <name>` | admin | Remove the ban for that name. |
+| `!checkban <name>` | admin | Query ban info (admin, date, reason). |
+| `!autohost [on\|off]` | admin | `on` enables autohost (requires `auto_host_game_name` set) and tries to host immediately; `off` disables; no argument shows status (state, game name, max games, auto-start players). |
+| `!say <text>` | admin | Broadcast text to **all bnet channels** (not into the game). |
+| `!pub <name>` | admin | Create a **public** game (name length must be 1–31). |
+| `!priv <name>` | admin | Create a **private** game (name length must be 1–31). |
+| `!unhost` | admin | Unhost the current lobby game. |
+| `!open <slot>` | admin | Open the given lobby slot (**1-based**, converted to 0-based internally). |
+| `!close <slot>` | admin | Close the given lobby slot (1-based). |
+| `!swap <s1> <s2>` | admin | Swap two slots (1-based; needs exactly two numbers). |
+| `!kick <name\|slot>` | admin | Kick: a pure number is a slot index (1-based), otherwise partial name match (case-insensitive). |
+| `!start` | admin | Start the lobby countdown. |
+| `!latency [n]` | admin | No argument queries; sets action interval in ms, **clamped 5~500** (see Special mechanics). |
+| `!synclimit [n]` | admin | No argument queries; `n` is the **lag batch count** (converted to a time window, see Special mechanics). |
+| `!exit`, `!quit` | **root** | Sends a shutdown reply, then triggers a full program shutdown. Rejected for non-root. |
+| `!disable` | admin | Disable game creation (including autohost). |
+| `!enable` | admin | Re-enable game creation and try autohost. |
+| `!downloads <0\|1\|2>` | admin | Set map download mode: `0` disabled (players without the map are kicked) / `1` enabled / `2` conditional. Other values show usage. |
+| `!getgames` | admin | Summary: lobby (0/1), in-progress count, max games, plus each game's name. |
+| `!getgame` | admin | Show the current lobby game's name and host_counter; reports none if empty. |
+| `!saygames <text>` | admin | Broadcast text to the lobby and **all in-progress** games. |
+| `!saygame <host_counter> <text>` | admin | Broadcast text to the game with the given host_counter. |
+| `!countadmins` | admin | Count admins for this server. |
+| `!countbans` | admin | Count bans for this server. |
+| `!dbstatus` | admin | Show the database backend description. |
+| `!channel <name>` | admin | Make the bot join the given channel. |
+| `!map [pattern]`, `!load [pattern]` | admin | Without a pattern: report the current map. With a pattern: case-insensitive partial match against .w3x/.w3m files in maps/ — a unique match is loaded and becomes the hosting map (applies to newly hosted games; existing games are unaffected); multiple matches list the first 5. |
 
 ---
 
-## 三、console(stdin)指令
+## 2. In-game lobby / in-progress commands
 
-來源:`console.rs` 讀入每行 → `BotEvent::ConsoleInput` → `handle_event`(`src/bot/mod.rs`)。
-本機操作台,**無權限檢查**。
+Source: `dispatch_lobby_command` (BotCore side, `src/bot/mod.rs`) + `handle_admin_command`
+(GameActor side, `src/game/actor.rs`). See "In-game commands require spoofcheck first" above.
 
-| 語法 | 說明 |
-|------|------|
-| `exit`、`quit` | 關閉整支程式。 |
-| `unhost` | 解除目前大廳的遊戲。 |
-| `start` | 讓目前大廳遊戲開始倒數。 |
-| `say <text>` | 對所有 bnet 頻道廣播文字。 |
-| `pub <name>` | 建立公開遊戲。 |
-| `priv <name>` | 建立私人遊戲。 |
+### Available to regular players (no spoofcheck, no admin)
 
-> 註:console 指令 **不含** 觸發字元 `!`,直接輸入關鍵字。未知輸入僅記 warn。
+| Syntax | Permission | Description |
+|--------|------------|-------------|
+| `!checkme` | regular player | Whisper-reply with your own info: ping, whether spoofed, realm. |
+| `!version` | regular player | Whisper-reply with the version string. |
+| `!stats` | regular player | **Whitelisted but not implemented** (W3MMD stats unfinished); currently no response. |
+| `!statsdota` | regular player | Same as above, no response. |
 
----
+### Require admin + spoofcheck
 
-## 特殊機制
+Handled directly by BotCore (lobby control):
 
-### spoofcheck 流程與 `sc` 密語
+| Syntax | Permission | Description |
+|--------|------------|-------------|
+| `!say <text>` | admin | Broadcast to everyone as the host (lobby flag 16 / in-game flag 32). |
+| `!open <slot>` | admin | Open a slot (1-based). No effect after game start. |
+| `!close <slot>` | admin | Close a slot (1-based). If a human occupies it, they are kicked first. |
+| `!swap <s1> <s2>` | admin | Swap two slots (1-based). Behavior depends on map options (fixed settings / custom forces). |
+| `!kick <name\|slot>` | admin | Kick: number = slot (1-based), otherwise partial name match. |
+| `!start` | admin | Start the countdown; rejected if anyone is still downloading the map. |
+| `!latency [n]` | admin | Query / set action interval in ms (clamped 5~500). |
+| `!synclimit [n]` | admin | Query / set lag tolerance (entered as batch count, stored internally as a time window). |
+| `!unhost` | admin | Unhost the lobby game. **Note**: the implementation acts on the "current lobby", not the sender's own game (see the inconsistency list). |
 
-- 玩家在 battle.net **密語** bot 帳號,訊息(去空白、轉小寫後)為 `s`、`sc` 或 `spoofcheck` 之一
-  即觸發 spoofcheck(`bnet.rs` 的 `handle_chat_event`)。
-- 密語經伺服器認證,`user` 即真實帳號,無法偽造。BnetActor 送出 `BnetEvent::SpoofCheck`。
-- BotCore 收到後,對 **目前大廳** 同名玩家送 `GameCommand::SpoofCheck { name, realm }`;
-  GameActor 標記該玩家 `spoofed=true` 並記下 `spoofed_realm`,公開廣播「已通過 spoofcheck」。
-- 之後該玩家的遊戲內指令即以 `spoofed_realm` 判定 admin 權限。
-- **GProxy++** client 加入遊戲時會自動發送此密語,一般玩家無需手動。
+Handled by GameActor (`handle_admin_command`):
 
-### autohost 行為
+| Syntax | Permission | Description |
+|--------|------------|-------------|
+| `!abort`, `!a` | admin | Cancel the start countdown; whispers a note if none is running. |
+| `!openall` | admin | Open all currently closed slots. |
+| `!closeall` | admin | Close all currently open slots. |
+| `!sp` | admin | Shuffle players (randomly reassign occupied human players across occupied slots). |
+| `!hold <name> [name...]` | admin | Reserve names: add names (lowercased) to the hold list; consumed once on join. |
+| `!mute <name>` | admin | Mute a player (their messages are not relayed). Partial name match. |
+| `!unmute <name>` | admin | Unmute. |
+| `!muteall` | admin | Mute all: in game only blocks "all"-scope public messages (flag 32, mode 0); team / private still pass. |
+| `!unmuteall` | admin | Undo mute-all. |
+| `!check [name]` | admin | Whisper-reply with player info (ping, spoofed, realm); omitting the name queries yourself. |
+| `!trigger` | admin | Whisper-reply with the current trigger character (always replies `!`). |
+| `!from` | admin | List each player's IP (country lookup needs GeoIP, not implemented, so IP only). |
+| `!ping [n]` | admin | No argument: whisper-list everyone's ping; with a number `n`: kick players whose average ping > `n` ms. |
+| `!drop` | admin | While in game and someone is lagging, drop all lagging players; otherwise whispers that no one is lagging. |
+| `!end` | admin | Force-end the current game. |
+| `!autostart [n\|off]` | admin | Auto-start at `n` players (countdown only once everyone has confirmed the map); `off` or no argument disables. |
+| `!announce [secs msg \| off]` | admin | Broadcast `msg` in the lobby every `secs`; `off` or no argument disables. |
+| `!hcl [str]` | admin | No argument shows the current HCL string; setting checks game-started / length / allowed chars (see Special mechanics). |
+| `!clearhcl` | admin | Clear the HCL string (rejected if the game has started). |
 
-- 啟用條件(初值):`auto_host_game_name` 非空、`auto_host_maximum_games > 0`、
-  `auto_host_auto_start_players > 0`。可用 `!autohost on/off` 執行期切換。
-- `try_autohost` 觸發時機:bnet 登入完成、開局(大廳空出)、遊戲刪除。
-- 會被以下情況擋下:`!disable` 停用中、autohost 關閉、目前已有大廳遊戲、進行中場數達
-  `auto_host_maximum_games`、地圖無效、無任何 bnet 連線。
-- 開出的房名為 `「房名 #N」`(N 為遞增計數)。房內滿 `auto_host_auto_start_players` 人
-  且全員完成地圖確認即自動倒數(`maybe_autostart`)。
-
-### `!hcl` 字元 / 長度限制
-
-- 合法字元集:`abcdefghijklmnopqrstuvwxyz0123456789 -=,.`(常數 `HCL_ALLOWED_CHARS`)。
-- 長度不得超過 **目前佔用中的 slot 數**(`occupied_slot_count`),否則回「too long」。
-- 含非法字元 → 回「invalid chars」。已開局(`started`)→ 拒絕修改。
-- 開局時把 HCL 字串編碼進各佔用 slot 的 handicap 欄位,供地圖端解碼選模式;
-  初值取自地圖預設 HCL(`map_defaulthcl`)。
-
-### `!latency` / `!synclimit`(lag 容忍模型)
-
-- `latency_ms` 初值來自設定 `bot_latency`(預設 100),**clamp 5~500**(`LATENCY_MIN`/`LATENCY_MAX`)。
-- lag 容忍採「時間窗」`sync_window_ms`(初值 `SYNC_TOLERANCE_MS = 5000` ms)。
-  實際觸發 lag 畫面的落後批次數 = `sync_window_ms / latency_ms`(至少 1),隨 latency 自動換算。
-- `!synclimit <n>`:把使用者給的 **批次數** 換算回時間窗 `n × latency`,並 clamp
-  `SYNC_WINDOW_MIN_MS(500)` ~ `SYNC_WINDOW_MAX_MS(30000)` ms。
-
-### `!ping` 的 RTT 來源與 `lc_pings`
-
-- RTT 由 `W3GS_PONG_TO_HOST` 計算:host 送 PING 時放入 `get_ticks`,pong 回來時
-  `RTT = 現在 ticks − pong`。第一個 pong(常為 1)丟棄;RTT ≥ 60000 ms 視為異常濾除;
-  每位玩家保留最近 10 筆,顯示取平均。
-- `lc_pings`(設定 `bot_lcpings`)為真時,顯示值再 **除以二**(單程估計)。
+> Any other string is silently ignored by GameActor (debug log only).
 
 ---
 
-## 未實作(對照原版 GHost++,刻意不做)
+## 3. console (stdin) commands
 
-| 指令 / 功能 | 未實作理由 |
-|------|------|
-| `!savegame` 系列(load/host saved game) | 存讀檔續玩流程未移植。 |
-| `!hostsg` / admin game(`!` admin-only 房) | 專用管理遊戲介面未移植。 |
-| matchmaking(`!pub`/`!priv` 以外的配對) | ELO/配對系統未移植。 |
-| warden(反作弊模組) | Warden 質詢/回應未移植。 |
-| `!votekick` | 投票踢人未移植。 |
-| comp 系列(`!comp`/`!compcolour`/`!comprace`/`!comphandicap`/`!compteam`) | 加入電腦玩家未移植。 |
-| `!owner` / `!lock` / `!unlock` | 房主鎖定機制未移植(權限改以 spoofcheck + admin 判定)。 |
-| `!stats` / `!statsdota` | W3MMD 統計未完成;指令已列入白名單但目前無回應。 |
-| `!from` 的國別查詢 | GeoIP 未整合,`!from` 只顯示 IP。 |
-| `!reload` | 重載設定檔未實作(換地圖請用 `!map <關鍵字>`)。 |
-| `!sendlan` | 區網廣播(UDP)未移植。 |
+Source: `console.rs` reads each line → `BotEvent::ConsoleInput` → `handle_event` (`src/bot/mod.rs`).
+This is the local operator console, with **no permission checks**.
+
+| Syntax | Description |
+|--------|-------------|
+| `exit`, `quit` | Shut down the whole program. |
+| `unhost` | Unhost the current lobby game. |
+| `start` | Start the current lobby game's countdown. |
+| `say <text>` | Broadcast text to all bnet channels. |
+| `pub <name>` | Create a public game. |
+| `priv <name>` | Create a private game. |
+
+> Note: console commands do **not** use the `!` trigger; type the keyword directly. Unknown input just logs a warning.
+
+---
+
+## Special mechanics
+
+### spoofcheck flow and the `sc` whisper
+
+- A player **whispers** the bot account on battle.net; if the message (trimmed and lowercased) is exactly
+  `s`, `sc`, or `spoofcheck`, it triggers spoofcheck (`handle_chat_event` in `bnet.rs`).
+- The whisper is server-authenticated, so `user` is the real account and cannot be forged. BnetActor emits
+  `BnetEvent::SpoofCheck`.
+- BotCore then sends `GameCommand::SpoofCheck { name, realm }` to the same-named player in the **current lobby**;
+  GameActor marks that player `spoofed=true`, records `spoofed_realm`, and publicly announces "spoofcheck accepted".
+- That player's subsequent in-game commands are then authorized against `spoofed_realm`.
+- **GProxy++** clients send this whisper automatically on join, so regular players usually need not do it manually.
+
+### autohost behavior
+
+- Enabled (initial value) when: `auto_host_game_name` is non-empty, `auto_host_maximum_games > 0`, and
+  `auto_host_auto_start_players > 0`. Toggle at runtime with `!autohost on/off`.
+- `try_autohost` fires on: bnet login complete, game start (lobby freed), and game deletion.
+- It is blocked when: `!disable` is active, autohost is off, a lobby game already exists, in-progress count
+  reaches `auto_host_maximum_games`, the map is invalid, or there are no bnet connections.
+- Hosted names are `"<name> #N"` (N is an incrementing counter). When the game reaches
+  `auto_host_auto_start_players` and everyone has confirmed the map, the countdown starts automatically
+  (`maybe_autostart`).
+
+### `!hcl` character / length limits
+
+- Allowed character set: `abcdefghijklmnopqrstuvwxyz0123456789 -=,.` (constant `HCL_ALLOWED_CHARS`).
+- Length must not exceed the **current number of occupied slots** (`occupied_slot_count`), else "too long".
+- Invalid characters → "invalid chars". If the game has started (`started`) → modification rejected.
+- On game start the HCL string is encoded into each occupied slot's handicap field for the map to decode
+  and pick a mode; the initial value comes from the map default HCL (`map_defaulthcl`).
+
+### `!latency` / `!synclimit` (lag tolerance model)
+
+- `latency_ms` initial value comes from config `bot_latency` (default 100), **clamped 5~500**
+  (`LATENCY_MIN`/`LATENCY_MAX`).
+- Lag tolerance uses a "time window" `sync_window_ms` (initial `SYNC_TOLERANCE_MS = 5000` ms). The actual
+  lag-screen trigger batch count = `sync_window_ms / latency_ms` (at least 1), auto-derived from latency.
+- `!synclimit <n>`: converts the user's **batch count** back into a time window `n × latency`, clamped to
+  `SYNC_WINDOW_MIN_MS (500)` ~ `SYNC_WINDOW_MAX_MS (30000)` ms.
+
+### `!ping` RTT source and `lc_pings`
+
+- RTT is computed from `W3GS_PONG_TO_HOST`: the host stores `get_ticks` when sending PING, and on pong
+  `RTT = now ticks − pong`. The first pong (usually 1) is dropped; RTT ≥ 60000 ms is treated as abnormal and
+  filtered; the last 10 samples per player are kept and averaged for display.
+- When `lc_pings` (config `bot_lcpings`) is true, the displayed value is **halved** (one-way estimate).
+
+---
+
+## Not implemented (compared with original GHost++, intentionally omitted)
+
+| Command / feature | Reason not implemented |
+|-------------------|------------------------|
+| `!savegame` family (load/host saved game) | Save/load resume flow not ported. |
+| `!hostsg` / admin game (admin-only game) | Dedicated admin-game interface not ported. |
+| matchmaking (beyond `!pub`/`!priv`) | ELO/matchmaking system not ported. |
+| warden (anti-cheat module) | Warden challenge/response not ported. |
+| `!votekick` | Vote-kick not ported. |
+| comp family (`!comp`/`!compcolour`/`!comprace`/`!comphandicap`/`!compteam`) | Adding computer players not ported. |
+| `!owner` / `!lock` / `!unlock` | Game-owner lock mechanism not ported (authorization is now spoofcheck + admin). |
+| `!stats` / `!statsdota` | W3MMD stats unfinished; the commands are whitelisted but currently return nothing. |
+| `!from` country lookup | GeoIP not integrated; `!from` shows IP only. |
+| `!reload` | Config file reload not implemented (use `!map <pattern>` to switch maps). |
+| `!sendlan` | LAN (UDP) broadcast not ported. |
