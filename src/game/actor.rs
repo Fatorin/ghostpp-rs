@@ -1564,6 +1564,14 @@ impl GameActor {
                 return;
             }
         };
+        // Make room for the joiner: with 11 players already seated the virtual host occupies the
+        // last valid PID (only 1-12 exist), so delete it first. Without this the 12th player got
+        // PID 13, which corrupts every client's lobby and disconnects them all
+        // (mirrors C++ EventPlayerJoined: GetNumPlayers() >= 11 → DeleteVirtualHost())
+        if self.players.len() >= 11 {
+            self.delete_virtual_host().await;
+        }
+
         let pid = match self.new_pid() {
             Some(p) => p,
             None => {
@@ -1576,9 +1584,10 @@ impl GameActor {
         };
 
         let (external_ip, external_port) = addr_bytes(handle.peer, self.cfg.hide_ip);
-        // GProxy counting: the directly-sent SLOTINFOJOIN + vhost PLAYERINFO + existing players' PLAYERINFO + MAPCHECK below
-        // total 3 + N packets, counted into total_sent's initial value when the player record is created (mirrors C++ counting everything from connection start)
-        let pre_sent = 3 + self.players.len() as u32;
+        // GProxy counting: the directly-sent SLOTINFOJOIN + vhost PLAYERINFO (when present) + existing
+        // players' PLAYERINFO + MAPCHECK below, counted into total_sent's initial value when the
+        // player record is created (mirrors C++ counting everything from connection start)
+        let pre_sent = if self.virtual_host_pid != 255 { 3 } else { 2 } + self.players.len() as u32;
 
         // Occupy the slot
         self.slots[sid].pid = pid;
@@ -1600,15 +1609,17 @@ impl GameActor {
             ))
             .await;
 
-        // 2) the virtual host's PLAYERINFO (so the lobby shows a host)
-        let _ = handle
-            .send(GameProtocol::send_w3gs_playerinfo(
-                self.virtual_host_pid,
-                self.cfg.virtual_host_name.clone(),
-                vec![0, 0, 0, 0],
-                vec![0, 0, 0, 0],
-            ))
-            .await;
+        // 2) the virtual host's PLAYERINFO (so the lobby shows a host; absent in a full lobby)
+        if self.virtual_host_pid != 255 {
+            let _ = handle
+                .send(GameProtocol::send_w3gs_playerinfo(
+                    self.virtual_host_pid,
+                    self.cfg.virtual_host_name.clone(),
+                    vec![0, 0, 0, 0],
+                    vec![0, 0, 0, 0],
+                ))
+                .await;
+        }
 
         // 3) existing players' PLAYERINFO
         for p in self.players.values() {
@@ -1771,7 +1782,8 @@ impl GameActor {
 
             if start_download {
                 info!("[GAME: {}] pid={pid} started map download", self.cfg.game_name);
-                let pkt = GameProtocol::send_w3gs_startdownload(self.virtual_host_pid);
+                // from = host_pid: the virtual host may be gone in a full lobby (mirrors C++ GetHostPID)
+                let pkt = GameProtocol::send_w3gs_startdownload(self.host_pid());
                 self.send_to_pid(pid, pkt).await;
             }
             self.send_map_parts(pid).await;
@@ -1833,9 +1845,11 @@ impl GameActor {
         }
 
         let mut packets = Vec::new();
+        // from = host_pid: the virtual host may be gone in a full lobby (mirrors C++ GetHostPID)
+        let from_pid = self.host_pid();
         while sent < self.map_size && sent < acked.saturating_add(WINDOW) {
             packets.push(GameProtocol::send_w3gs_mappart(
-                self.virtual_host_pid,
+                from_pid,
                 pid,
                 sent as usize,
                 map_data,
@@ -2008,11 +2022,8 @@ impl GameActor {
         self.send_all_slot_info().await;
         self.send_all(GameProtocol::send_w3gs_countdown_start()).await;
         // Delete the virtual host (the client removes it from the player list)
-        self.send_all(GameProtocol::send_w3gs_playerleave_others(
-            self.virtual_host_pid,
-            PLAYERLEAVE_LOBBY as u32,
-        ))
-        .await;
+        // Delete the virtual host (no-op if it was already deleted for a full lobby)
+        self.delete_virtual_host().await;
         self.send_all(GameProtocol::send_w3gs_countdown_end()).await;
 
         // Enter the loading state, waiting for all players to GAMELOADED_SELF
@@ -2332,6 +2343,9 @@ impl GameActor {
             .await;
         if !self.started {
             self.send_all_slot_info().await;
+            // A PID freed up in the lobby → bring the virtual host back if it was deleted
+            // for a full house (mirrors the CreateVirtualHost call in C++ CBaseGame::Update)
+            self.create_virtual_host().await;
         }
 
         // Someone left during the countdown → abort it and return to the lobby (a client cannot be forced to stay, so we "cancel the start if anyone leaves")
@@ -2456,7 +2470,9 @@ impl GameActor {
     /// At game start the virtual host has already been removed via PLAYERLEAVE, and the client ignores chat
     /// packets from a nonexistent PID, so after the game starts a real player must be used: prefer the owner, otherwise the smallest PID.
     fn host_pid(&self) -> u8 {
-        if !self.started {
+        // The virtual host when present; otherwise (a full 12-player lobby deletes it, and it is
+        // gone after the game starts) fall back to the owner / lowest-pid player (mirrors C++ GetHostPID)
+        if !self.started && self.virtual_host_pid != 255 {
             return self.virtual_host_pid;
         }
         if let Some(p) = self
@@ -2562,9 +2578,48 @@ impl GameActor {
         self.slots.iter().position(|s| s.pid == pid)
     }
 
-    /// Allocate the smallest unused PID (1..=255, excluding the virtual host and existing players)
+    /// Allocate the smallest unused PID, excluding the virtual host and existing players.
+    /// Warcraft III only accepts PIDs 1-12: a larger value corrupts every client's lobby state,
+    /// so when none is free the caller must reject the join instead.
     fn new_pid(&self) -> Option<u8> {
-        (1u8..=255).find(|&pid| pid != self.virtual_host_pid && !self.players.contains_key(&pid))
+        (1u8..=12).find(|&pid| pid != self.virtual_host_pid && !self.players.contains_key(&pid))
+    }
+
+    /// Delete the virtual host to free its PID (broadcasts its PLAYERLEAVE; mirrors C++ DeleteVirtualHost).
+    /// Needed when the 12th player joins - all 12 PIDs then belong to real players - and at game start.
+    async fn delete_virtual_host(&mut self) {
+        if self.virtual_host_pid == 255 {
+            return;
+        }
+        let pid = self.virtual_host_pid;
+        self.virtual_host_pid = 255;
+        info!("[GAME: {}] deleting virtual host (pid={pid})", self.cfg.game_name);
+        self.send_all(GameProtocol::send_w3gs_playerleave_others(
+            pid,
+            PLAYERLEAVE_LOBBY as u32,
+        ))
+        .await;
+    }
+
+    /// Re-create the virtual host once a PID is free again in the lobby
+    /// (mirrors the CreateVirtualHost call in C++ CBaseGame::Update)
+    async fn create_virtual_host(&mut self) {
+        if self.virtual_host_pid != 255 || self.started {
+            return;
+        }
+        let pid = match self.new_pid() {
+            Some(p) => p,
+            None => return,
+        };
+        self.virtual_host_pid = pid;
+        info!("[GAME: {}] re-creating virtual host (pid={pid})", self.cfg.game_name);
+        self.send_all(GameProtocol::send_w3gs_playerinfo(
+            pid,
+            self.cfg.virtual_host_name.clone(),
+            vec![0, 0, 0, 0],
+            vec![0, 0, 0, 0],
+        ))
+        .await;
     }
 }
 
@@ -2607,4 +2662,201 @@ fn addr_bytes(peer: SocketAddr, hide: bool) -> (Vec<u8>, Vec<u8>) {
     };
     let port = peer.port().to_be_bytes().to_vec();
     (ip, port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{BanRecord, DbResult, GamePlayerRecord, GameRecord, GhostDb};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    struct NullDb;
+
+    #[async_trait::async_trait]
+    impl GhostDb for NullDb {
+        fn description(&self) -> String {
+            "null test db".into()
+        }
+        async fn admin_add(&self, _: &str, _: &str) -> DbResult<bool> {
+            Ok(false)
+        }
+        async fn admin_remove(&self, _: &str, _: &str) -> DbResult<bool> {
+            Ok(false)
+        }
+        async fn admin_check(&self, _: &str, _: &str) -> DbResult<bool> {
+            Ok(false)
+        }
+        async fn admin_list(&self, _: &str) -> DbResult<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn ban_add(&self, _: &BanRecord) -> DbResult<bool> {
+            Ok(true)
+        }
+        async fn ban_remove(&self, _: &str, _: &str) -> DbResult<bool> {
+            Ok(false)
+        }
+        async fn ban_check(&self, _: &str, _: &str, _: &str) -> DbResult<Option<BanRecord>> {
+            Ok(None)
+        }
+        async fn ban_list(&self, _: &str) -> DbResult<Vec<BanRecord>> {
+            Ok(vec![])
+        }
+        async fn game_add(&self, _: &GameRecord, _: &[GamePlayerRecord]) -> DbResult<u64> {
+            Ok(0)
+        }
+    }
+
+    fn make_cfg(map: Arc<GameMap>) -> GameConfig {
+        GameConfig {
+            host_counter: 1,
+            game_name: "testgame".into(),
+            game_state: GAME_PUBLIC,
+            map,
+            virtual_host_name: "TestHost".into(),
+            hide_ip: false,
+            lc_pings: false,
+            latency_ms: 100,
+            db: Arc::new(NullDb),
+            servers: vec![],
+            owner_name: "owner".into(),
+            autostart_players: 0,
+            reconnect_enabled: false,
+            reconnect_port: 0,
+            gproxy_empty_actions: 0,
+            save_replays: false,
+            replay_path: String::new(),
+            replay_war3_version: 26,
+            replay_build_number: 6059,
+            download_mode: 1,
+        }
+    }
+
+    fn assign_len(mut p: Vec<u8>) -> Vec<u8> {
+        let len = p.len() as u16;
+        p[2..4].copy_from_slice(&len.to_le_bytes());
+        p
+    }
+
+    fn build_reqjoin(name: &str) -> Vec<u8> {
+        let mut p = vec![W3GS_HEADER_CONSTANT, W3GS_REQJOIN, 0, 0];
+        p.extend(1u32.to_le_bytes()); // host counter
+        p.extend(0u32.to_le_bytes()); // entry key
+        p.push(0); // unknown
+        p.extend(6112u16.to_le_bytes()); // listen port
+        p.extend(0u32.to_le_bytes()); // peer key
+        p.extend(name.as_bytes());
+        p.push(0);
+        p.extend(0u32.to_le_bytes()); // unknown
+        p.extend(0u16.to_le_bytes()); // internal port
+        p.extend([127, 0, 0, 1]); // internal IP
+        assign_len(p)
+    }
+
+    /// Read one W3GS frame → (packet id, full packet bytes)
+    async fn read_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut hdr = [0u8; 4];
+        stream.read_exact(&mut hdr).await.expect("read frame header");
+        let len = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
+        assert!(len >= 4, "bad frame length");
+        let mut data = vec![0u8; len];
+        data[..4].copy_from_slice(&hdr);
+        stream.read_exact(&mut data[4..]).await.expect("read frame body");
+        (hdr[1], data)
+    }
+
+    /// Skip frames until the wanted packet id arrives (pings/chat/slot info are interleaved)
+    async fn wait_for_frame(stream: &mut TcpStream, want: u8, secs: u64) -> Vec<u8> {
+        tokio::time::timeout(Duration::from_secs(secs), async {
+            loop {
+                let (id, data) = read_frame(stream).await;
+                if id == want {
+                    return data;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for packet 0x{want:02X}"))
+    }
+
+    /// Connect a fake client, route it into the actor, and complete the join handshake.
+    /// Returns the connected stream and the PID assigned in SLOTINFOJOIN.
+    async fn join_client(
+        listener: &TcpListener,
+        game_tx: &mpsc::Sender<GameCommand>,
+        name: &str,
+    ) -> (TcpStream, u8) {
+        let addr = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let mut client = client.unwrap();
+        let (server_stream, peer) = server.unwrap();
+        game_tx
+            .send(GameCommand::NewConnection { stream: server_stream, peer })
+            .await
+            .unwrap();
+        client.write_all(&build_reqjoin(name)).await.unwrap();
+        let data = wait_for_frame(&mut client, W3GS_SLOTINFOJOIN, 10).await;
+        // PID sits right after the length-prefixed slot info block
+        let slot_info_len = u16::from_le_bytes([data[4], data[5]]) as usize;
+        let pid = data[6 + slot_info_len];
+        (client, pid)
+    }
+
+    /// Regression test for the full-lobby kick: the 12th joiner used to be handed PID 13
+    /// (only 1-12 are valid), corrupting every client's lobby and disconnecting them all.
+    /// Now the virtual host is deleted to free its PID, and re-created when a slot opens.
+    #[tokio::test]
+    async fn full_lobby_keeps_all_twelve_players_connected() {
+        let map = Arc::new(GameMap::new()); // hardcoded defaults: 12 open slots
+        let (event_tx, _event_rx) = mpsc::channel(256);
+        let handle = spawn(make_cfg(Arc::clone(&map)), event_tx);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let mut clients: Vec<TcpStream> = Vec::new();
+        let mut pids: Vec<u8> = Vec::new();
+        for i in 0..12 {
+            let (client, pid) = join_client(&listener, &handle.tx, &format!("P{}", i + 1)).await;
+            assert!(
+                (1..=12).contains(&pid),
+                "player {} got invalid pid {pid} (Warcraft III only supports 1-12)",
+                i + 1
+            );
+            assert!(!pids.contains(&pid), "pid {pid} assigned twice");
+            pids.push(pid);
+            clients.push(client);
+        }
+
+        // The 12th join required the virtual host's PID: client 1 must have seen its
+        // PLAYERLEAVE (pid 1 - the virtual host's initial PID, freed for the last joiner)
+        let leave = wait_for_frame(&mut clients[0], W3GS_PLAYERLEAVE_OTHERS, 10).await;
+        assert_eq!(leave[4], 1, "expected the virtual host (pid 1) to be deleted when full");
+
+        // Nobody got kicked: every client still receives the 5-second host ping
+        // (a dropped connection panics inside read_frame instead)
+        for c in clients.iter_mut() {
+            wait_for_frame(c, W3GS_PING_FROM_HOST, 10).await;
+        }
+
+        // A 13th player is rejected cleanly (no free slot / PID)
+        let addr = listener.local_addr().unwrap();
+        let (extra, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let mut extra = extra.unwrap();
+        let (server_stream, peer) = server.unwrap();
+        handle
+            .tx
+            .send(GameCommand::NewConnection { stream: server_stream, peer })
+            .await
+            .unwrap();
+        extra.write_all(&build_reqjoin("P13")).await.unwrap();
+        wait_for_frame(&mut extra, W3GS_REJECTJOIN, 10).await;
+
+        // One player leaves → their PID frees up → the virtual host is re-created
+        let leaver_pid = pids[5];
+        drop(clients.remove(5));
+        let info = wait_for_frame(&mut clients[0], W3GS_PLAYERINFO, 10).await;
+        assert_eq!(info[8], leaver_pid, "virtual host should reuse the freed pid");
+        let name_end = info[9..].iter().position(|&b| b == 0).unwrap() + 9;
+        assert_eq!(&info[9..name_end], b"TestHost", "the re-created player must be the virtual host");
+    }
+
 }
