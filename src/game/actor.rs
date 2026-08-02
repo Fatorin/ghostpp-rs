@@ -181,6 +181,9 @@ struct GameActor {
     started: bool,
     /// Total map size (bytes, cached from the map_size field)
     map_size: u32,
+    /// Raw map bytes for map downloads: loaded when the lobby is created, shared with any
+    /// concurrent games via GameMap's cache, freed when the last game holding it closes
+    map_data: Option<Arc<Vec<u8>>>,
     /// !start countdown: Some(remaining count), decremented every 500ms, 0 → start (mirrors C++ m_CountDownCounter)
     countdown: Option<u8>,
     /// slot info pending broadcast (for download progress, throttled to once per second; mirrors C++ m_SlotInfoChanged)
@@ -258,6 +261,7 @@ impl GameActor {
             random_seed: get_ticks() as u32,
             started: false,
             map_size,
+            map_data: None,
             countdown: None,
             slot_info_changed: false,
             latency_ms: cfg_latency,
@@ -287,6 +291,22 @@ impl GameActor {
             "[GAME: {}] lobby created (host_counter={})",
             self.cfg.game_name, self.cfg.host_counter
         );
+
+        // Hold the raw map bytes for this game's lifetime (map downloads need them).
+        // The read can be tens of MB, so it runs on a blocking thread; commands simply
+        // queue in cmd_rx until it finishes. Without a readable map file this stays None
+        // and players lacking the map are kicked (same as before with empty map_data).
+        let map = Arc::clone(&self.cfg.map);
+        self.map_data = tokio::task::spawn_blocking(move || map.load_map_data())
+            .await
+            .unwrap_or_default();
+        if let Some(data) = &self.map_data {
+            debug!(
+                "[GAME: {}] map data loaded ({} bytes)",
+                self.cfg.game_name,
+                data.len()
+            );
+        }
 
         // The lobby pings players every 5 seconds
         let mut ping_tick = interval(Duration::from_secs(5));
@@ -1753,7 +1773,7 @@ impl GameActor {
                 self.remove_player(pid, PLAYERLEAVE_LOBBY as u32).await;
                 return;
             }
-            if self.cfg.map.get_map_data().is_empty() {
+            if self.map_data.is_none() {
                 warn!(
                     "[GAME: {}] pid={pid} has no map and no local map file to send, kicking",
                     self.cfg.game_name
@@ -1832,10 +1852,10 @@ impl GameActor {
         const PART: u32 = 1442;
         const WINDOW: u32 = PART * 100;
 
-        let map_data = self.cfg.map.get_map_data();
-        if map_data.is_empty() {
-            return;
-        }
+        let map_data = match self.map_data.clone() {
+            Some(data) => data,
+            None => return,
+        };
         let (mut sent, acked, downloading) = match self.players.get(&pid) {
             Some(p) => (p.last_part_sent, p.last_part_acked, p.download_started && !p.download_finished),
             None => return,
@@ -1852,7 +1872,7 @@ impl GameActor {
                 from_pid,
                 pid,
                 sent as usize,
-                map_data,
+                &map_data,
             ));
             sent = sent.saturating_add(PART).min(self.map_size);
         }
@@ -2753,6 +2773,23 @@ mod tests {
         assign_len(p)
     }
 
+    fn build_mapsize(flag: u8, size: u32) -> Vec<u8> {
+        let mut p = vec![W3GS_HEADER_CONSTANT, W3GS_MAPSIZE, 0, 0];
+        p.extend(1u32.to_le_bytes()); // unknown
+        p.push(flag);
+        p.extend(size.to_le_bytes());
+        assign_len(p)
+    }
+
+    fn build_mappartok(from_pid: u8, to_pid: u8, size: u32) -> Vec<u8> {
+        let mut p = vec![W3GS_HEADER_CONSTANT, W3GS_MAPPARTOK, 0, 0];
+        p.push(from_pid);
+        p.push(to_pid);
+        p.extend(1u32.to_le_bytes()); // unknown
+        p.extend(size.to_le_bytes());
+        assign_len(p)
+    }
+
     /// Read one W3GS frame → (packet id, full packet bytes)
     async fn read_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
         let mut hdr = [0u8; 4];
@@ -2859,4 +2896,96 @@ mod tests {
         assert_eq!(&info[9..name_end], b"TestHost", "the re-created player must be the virtual host");
     }
 
+    /// End-to-end lobby flow against a real GameActor over a real socket:
+    /// join → map download (lazily loaded raw bytes) → !start → load → first action batch,
+    /// then verify the raw map bytes are freed once the game closes.
+    #[tokio::test]
+    async fn map_download_and_game_start_end_to_end() {
+        // A synthetic "map file": the download path only needs bytes on disk + a matching map_size
+        let payload: Vec<u8> = (0u32..50_000).map(|i| (i % 251) as u8).collect();
+        let path = std::env::temp_dir().join("ghostpp_rs_actor_download_test.bin");
+        std::fs::write(&path, &payload).unwrap();
+
+        let map = Arc::new(GameMap::new_with_file_for_test(
+            path.to_str().unwrap(),
+            payload.len() as u32,
+        ));
+        assert!(!map.map_data_resident(), "no game yet - map data must not be resident");
+
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+        let handle = spawn(make_cfg(Arc::clone(&map)), event_tx);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        // Join: REQJOIN → SLOTINFOJOIN → … → MAPCHECK
+        let (mut client, _pid) = join_client(&listener, &handle.tx, "Tester").await;
+        wait_for_frame(&mut client, W3GS_MAPCHECK, 10).await;
+
+        // The lobby loaded the raw map bytes lazily
+        assert!(map.map_data_resident(), "map data should be loaded while a lobby exists");
+
+        // Report "no map" → STARTDOWNLOAD + MAPPART parts; ack them and reassemble
+        client.write_all(&build_mapsize(1, 0)).await.unwrap();
+        let mut received = vec![0u8; payload.len()];
+        let mut got: usize = 0;
+        while got < payload.len() {
+            let data = wait_for_frame(&mut client, W3GS_MAPPART, 10).await;
+            let to_pid = data[4];
+            let from_pid = data[5];
+            let start = u32::from_le_bytes(data[10..14].try_into().unwrap()) as usize;
+            let chunk = &data[18..];
+            received[start..start + chunk.len()].copy_from_slice(chunk);
+            got = got.max(start + chunk.len());
+            client
+                .write_all(&build_mappartok(from_pid, to_pid, got as u32))
+                .await
+                .unwrap();
+        }
+        assert_eq!(received, payload, "downloaded bytes must match the map file");
+        // Confirm the completed download, then wait for the "player downloaded map" chat:
+        // it proves the actor has processed the MAPSIZE (Start would otherwise race ahead
+        // of it through the command channel and be refused as "still downloading")
+        client
+            .write_all(&build_mapsize(1, payload.len() as u32))
+            .await
+            .unwrap();
+        wait_for_frame(&mut client, W3GS_CHAT_FROM_HOST, 10).await;
+
+        // !start: countdown (5×1s) → COUNTDOWN_START/END → client loads → first action batch
+        handle.tx.send(GameCommand::Start).await.unwrap();
+        wait_for_frame(&mut client, W3GS_COUNTDOWN_START, 10).await;
+        wait_for_frame(&mut client, W3GS_COUNTDOWN_END, 15).await;
+        client
+            .write_all(&[W3GS_HEADER_CONSTANT, W3GS_GAMELOADED_SELF, 4, 0])
+            .await
+            .unwrap();
+        wait_for_frame(&mut client, W3GS_GAMELOADED_OTHERS, 10).await;
+        wait_for_frame(&mut client, W3GS_INCOMING_ACTION, 10).await;
+
+        // Last player leaves → the game closes and the actor reports Deleted
+        drop(client);
+        let deleted = tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(ev) = event_rx.recv().await {
+                if let BotEvent::Game { event: GameEvent::Deleted, .. } = ev {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(deleted, "actor should report Deleted after the last player left");
+
+        // With the last game closed, the raw map bytes are freed
+        let mut freed = false;
+        for _ in 0..50 {
+            if !map.map_data_resident() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(freed, "map data should be freed after the last game closed");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

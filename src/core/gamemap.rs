@@ -1,6 +1,7 @@
 use std::io;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{Arc, Mutex, Weak};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use config::Config;
@@ -102,8 +103,13 @@ pub struct GameMap {
     map_default_player_score: u32,
     map_local_path: String,
     map_load_in_game: bool,
-    /// Raw map file contents (binary, used for map_size/map_info calculation and map download)
-    map_data: Vec<u8>,
+    /// Resolved on-disk path of the map file (bot_mappath + map_localpath), read lazily per game
+    map_file_path: String,
+    /// Byte length of the map file measured during load() (0 = file unreadable)
+    map_data_len: usize,
+    /// Raw map file contents (binary, used for map download), loaded on demand while games are
+    /// running and freed automatically when the last game holding an Arc closes
+    map_data_cache: Mutex<Weak<Vec<u8>>>,
     map_num_players: u32,
     map_num_teams: u32,
     pub slots: Vec<GameSlot>,
@@ -143,7 +149,9 @@ impl GameMap {
             map_default_player_score: 0,
             map_local_path: "".to_string(),
             map_load_in_game: false,
-            map_data: vec![],
+            map_file_path: String::new(),
+            map_data_len: 0,
+            map_data_cache: Mutex::new(Weak::new()),
             map_num_players: 12,
             map_num_teams: 12,
             slots,
@@ -333,8 +341,53 @@ impl GameMap {
         self.map_load_in_game
     }
 
-    pub fn get_map_data(&self) -> &[u8] {
-        &self.map_data
+    /// Lazily load the raw map file bytes (needed only while a game exists, for map downloads).
+    /// Concurrent games share one copy through the weak cache; when the last game drops its Arc
+    /// the memory is freed, and a later game re-reads the file from disk.
+    pub fn load_map_data(&self) -> Option<Arc<Vec<u8>>> {
+        let mut cache = self.map_data_cache.lock().unwrap();
+        if let Some(data) = cache.upgrade() {
+            return Some(data);
+        }
+        if self.map_file_path.is_empty() {
+            return None;
+        }
+        let data = match std::fs::read(&self.map_file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("[MAP] warning - unable to read map file [{}]: {e}", self.map_file_path);
+                return None;
+            }
+        };
+        // Refuse to serve a file that changed since startup: the advertised map_size / map_info
+        // no longer match, so clients would receive a corrupted download
+        if self.map_size.len() == 4
+            && data.len() != util_byte_array_to_u32(&self.map_size, false, 0) as usize
+        {
+            warn!(
+                "[MAP] map file [{}] size changed since startup, refusing to serve it",
+                self.map_file_path
+            );
+            return None;
+        }
+        let data = Arc::new(data);
+        *cache = Arc::downgrade(&data);
+        Some(data)
+    }
+
+    /// Test-only: a hardcoded-defaults map whose raw data lives in `path` (`size` bytes)
+    #[cfg(test)]
+    pub fn new_with_file_for_test(path: &str, size: u32) -> Self {
+        let mut map = Self::new();
+        map.map_file_path = path.to_string();
+        map.map_size = util_create_byte_array(size, false);
+        map
+    }
+
+    /// Test-only: whether some game currently holds the lazily loaded raw map data
+    #[cfg(test)]
+    pub fn map_data_resident(&self) -> bool {
+        self.map_data_cache.lock().unwrap().upgrade().is_some()
     }
 
     pub fn get_map_nuplayers(&self) -> u32 {
@@ -356,14 +409,20 @@ impl GameMap {
 
         let mpq_path = Path::new(&bot_mappath).join(&self.map_local_path);
         let mpq_path = mpq_path.to_str().unwrap_or("");
+        let mut map_data: Vec<u8> = vec![];
         if !mpq_path.is_empty() {
             // Fix: .w3x is a binary file; the original read_to_string would always fail UTF-8 and return an empty string,
             // causing map_size / map_info to be entirely wrong and map download to be unusable
-            self.map_data = std::fs::read(&mpq_path).unwrap_or_else(|_| {
+            map_data = std::fs::read(&mpq_path).unwrap_or_else(|_| {
                 warn!("[MAP] warning - unable to read map file [{}]", mpq_path);
                 vec![]
             });
         }
+        // Only the path and length are kept; the raw bytes are dropped after the size/CRC
+        // calculations below and re-read via load_map_data() while a game exists,
+        // so an idle bot does not keep the whole map file in memory
+        self.map_file_path = mpq_path.to_string();
+        self.map_data_len = map_data.len();
 
         let mpq_result = Archive::open(
             &mpq_path,
@@ -384,13 +443,14 @@ impl GameMap {
         let mut map_sha1: Vec<u8> = vec![];
 
         // calculate map_size
-        map_size = util_create_byte_array(self.map_data.len() as u32, false);
+        map_size = util_create_byte_array(map_data.len() as u32, false);
         info!("[MAP] calculated map_size = {}", util_byte_array_to_dec_string(&map_size));
 
         // calculate map_info (this is actually the CRC)
-        let crc32 = util_calc_crc32(self.map_data.as_ref());
+        let crc32 = util_calc_crc32(map_data.as_ref());
         map_info = util_create_byte_array(crc32, false);
         info!("[MAP] calculated map_info = {}", util_byte_array_to_dec_string(&map_info));
+        drop(map_data);
 
         // calculate map_crc (this is not the CRC) and map_sha1
         // a big thank you to Strilanc for figuring the map_crc algorithm out
@@ -670,7 +730,7 @@ impl GameMap {
         if self.map_size.len() != 4 {
             self.is_valid = false;
             warn!("[MAP] invalid map_size detected");
-        } else if !self.map_data.is_empty() && self.map_data.len() != util_byte_array_to_u32(&self.map_size, false, 0) as usize {
+        } else if self.map_data_len != 0 && self.map_data_len != util_byte_array_to_u32(&self.map_size, false, 0) as usize {
             self.is_valid = false;
             warn!("[MAP] invalid map_size detected - size mismatch with actual map data");
         }
@@ -1122,6 +1182,49 @@ mod tests {
         let result = read_war3map_i(&data);
 
         assert_eq!(result.is_ok(), true);
+    }
+
+    #[test]
+    fn lazy_map_data_shared_and_freed() {
+        let path = std::env::temp_dir().join("ghostpp_rs_lazy_map_data_test.bin");
+        let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        std::fs::write(&path, &payload).unwrap();
+
+        let mut map = GameMap::new();
+        map.map_file_path = path.to_str().unwrap().to_string();
+        map.map_size = util_create_byte_array(payload.len() as u32, false);
+
+        // First load reads the file; a second load while the first Arc is alive shares it
+        let d1 = map.load_map_data().expect("map data should load");
+        assert_eq!(*d1, payload);
+        let d2 = map.load_map_data().expect("map data should load");
+        assert!(Arc::ptr_eq(&d1, &d2));
+
+        // Dropping every Arc frees the memory (the cache holds only a Weak);
+        // the next game re-reads the file from disk
+        drop(d1);
+        drop(d2);
+        assert!(map.map_data_cache.lock().unwrap().upgrade().is_none());
+        let d3 = map.load_map_data().expect("map data should reload");
+        assert_eq!(*d3, payload);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lazy_map_data_rejects_changed_file() {
+        let path = std::env::temp_dir().join("ghostpp_rs_lazy_map_size_test.bin");
+        std::fs::write(&path, vec![7u8; 100]).unwrap();
+
+        let mut map = GameMap::new();
+        map.map_file_path = path.to_str().unwrap().to_string();
+        // Advertised map_size disagrees with the on-disk file → refuse to serve it
+        map.map_size = util_create_byte_array(999, false);
+        assert!(map.load_map_data().is_none());
+
+        // A missing file is also refused
+        let _ = std::fs::remove_file(&path);
+        assert!(map.load_map_data().is_none());
     }
 
     #[test]
