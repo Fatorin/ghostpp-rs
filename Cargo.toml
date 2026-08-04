@@ -58,11 +58,19 @@ codegen-units = 1
 opt-level = 3
 # Keep line tables so RUST_BACKTRACE=1 gives readable backtraces from a
 # long-running production bot; only a few MB over a fully stripped binary.
-# (For the absolute smallest binary use: debug = false, strip = "symbols".)
+# (Published release artifacts use the smaller `dist` profile below.)
 debug = "line-tables-only"
 strip = "none"
 # Deliberately NOT setting `panic = "abort"`: with unwinding, tokio isolates a
 # panicking task, so a bug in one game cannot take down every hosted game.
+
+[profile.dist]
+# Distribution builds (used by the release CI): same optimizations as release,
+# but with debug info removed and symbols stripped for the smallest download.
+# Local `cargo build --release` keeps line tables for readable backtraces.
+inherits = "release"
+debug = false
+strip = "symbols"
 
 [profile.dev]
 # Light optimization for our own code keeps compile times fast while making

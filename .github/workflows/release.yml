@@ -24,16 +24,19 @@ jobs:
         include:
           - name: windows-x64
             runner: windows-latest
-            bin: target/release/ghostpp-rs.exe
-            artifact: ghostpp-rs-windows-x64.exe
+            bin: target/dist/ghostpp-rs.exe
+            bin_name: ghostpp-rs.exe
+            artifact: ghostpp-rs-windows-x64.tar.gz
           - name: macos-arm64
             runner: macos-latest
-            bin: target/release/ghostpp-rs
-            artifact: ghostpp-rs-macos-arm64
+            bin: target/dist/ghostpp-rs
+            bin_name: ghostpp-rs
+            artifact: ghostpp-rs-macos-arm64.tar.gz
           - name: linux-x64
             runner: ubuntu-latest
-            bin: target/release/ghostpp-rs
-            artifact: ghostpp-rs-linux-x64
+            bin: target/dist/ghostpp-rs
+            bin_name: ghostpp-rs
+            artifact: ghostpp-rs-linux-x64.tar.gz
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,12 +50,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The `dist` profile strips debug info/symbols for the smallest download
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --profile dist --locked
 
-      - name: Rename binary
+      - name: Package (tar.gz)
         shell: bash
-        run: cp "${{ matrix.bin }}" "${{ matrix.artifact }}"
+        run: |
+          cp "${{ matrix.bin }}" "${{ matrix.bin_name }}"
+          tar -czf "${{ matrix.artifact }}" "${{ matrix.bin_name }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -93,28 +99,30 @@ jobs:
             -e RUSTFLAGS="-C target-feature=+crt-static" \
             rust:alpine sh -ec '
             apk add --no-cache build-base cmake zlib-dev zlib-static bzip2-dev bzip2-static
-            cargo build --release --locked --target aarch64-unknown-linux-musl
+            cargo build --profile dist --locked --target aarch64-unknown-linux-musl
           '
-
-      - name: Rename binary
-        run: cp target/aarch64-unknown-linux-musl/release/ghostpp-rs ghostpp-rs-linux-arm64-musl
 
       - name: Verify binary is fully static
         run: |
-          if readelf -d ghostpp-rs-linux-arm64-musl | grep -q NEEDED; then
+          if readelf -d target/aarch64-unknown-linux-musl/dist/ghostpp-rs | grep -q NEEDED; then
             echo "::error::Binary has dynamic library dependencies — not fully static"
             exit 1
           fi
           echo "OK: no dynamic dependencies"
 
+      - name: Package (tar.gz)
+        run: |
+          cp target/aarch64-unknown-linux-musl/dist/ghostpp-rs ghostpp-rs
+          tar -czf ghostpp-rs-linux-arm64-musl.tar.gz ghostpp-rs
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ghostpp-rs-linux-arm64-musl
-          path: ghostpp-rs-linux-arm64-musl
+          name: ghostpp-rs-linux-arm64-musl.tar.gz
+          path: ghostpp-rs-linux-arm64-musl.tar.gz
           if-no-files-found: error
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ghostpp-rs-linux-arm64-musl
+          files: ghostpp-rs-linux-arm64-musl.tar.gz
