@@ -693,22 +693,31 @@ impl GameMap {
         }
 
         // add observer slots
-        if self.map_observers == MAPOBS_ALLOWED || self.map_observers == MAPOBS_REFEREES
-        {
-            let mut default_max_slots = MAX_SLOTS;
-            if w3i.editor_version < 6060 {
-                default_max_slots = 12;
-            }
-            let cfg_max_slots = get_u32_from_config(&cfg, "map_maxslots", default_max_slots);
-            let slot_len = self.slots.len() as u32;
-            info!("[MAP] adding {} observer slots", cfg_max_slots - slot_len);
-
-            while slot_len < cfg_max_slots {
-                self.slots.push(GameSlot::new(0, 255, SLOTSTATUS_OPEN, 0, MAX_SLOTS.try_into().unwrap(), MAX_SLOTS.try_into().unwrap(), SLOTRACE_RANDOM, SLOTCOMP_EASY, 100));
-            }
-        }
+        self.add_observer_slots(cfg, w3i.editor_version);
 
         self.check_valid();
+    }
+
+    /// Pad the slot list out to map_maxslots with open observer slots.
+    fn add_observer_slots(&mut self, cfg: &Config, editor_version: u32) {
+        if self.map_observers != MAPOBS_ALLOWED && self.map_observers != MAPOBS_REFEREES {
+            return;
+        }
+
+        let mut default_max_slots = MAX_SLOTS;
+        if editor_version < 6060 {
+            default_max_slots = 12;
+        }
+        let cfg_max_slots = get_u32_from_config(cfg, "map_maxslots", default_max_slots);
+        // Fix: the loop condition read a slot count bound once before the loop, so it never became
+        // false and the push ran until the process ran out of memory; re-read the length each
+        // iteration like the C++ original. saturating_sub keeps the log line from panicking in debug
+        // builds when the map already has more slots than map_maxslots.
+        info!("[MAP] adding {} observer slots", cfg_max_slots.saturating_sub(self.slots.len() as u32));
+
+        while (self.slots.len() as u32) < cfg_max_slots {
+            self.slots.push(GameSlot::new(0, 255, SLOTSTATUS_OPEN, 0, MAX_SLOTS.try_into().unwrap(), MAX_SLOTS.try_into().unwrap(), SLOTRACE_RANDOM, SLOTCOMP_EASY, 100));
+        }
     }
 
     pub fn check_valid(&mut self) {
@@ -1225,6 +1234,67 @@ mod tests {
         // A missing file is also refused
         let _ = std::fs::remove_file(&path);
         assert!(map.load_map_data().is_none());
+    }
+
+    /// A map config with observers enabled must pad the slot list up to map_maxslots and stop
+    /// there; the padding loop used to spin forever because its condition never changed.
+    #[test]
+    fn observer_slots_are_capped_at_max_slots() {
+        fn cfg_with_max_slots(max_slots: i64) -> Config {
+            Config::builder()
+                .set_default("map_maxslots", max_slots)
+                .unwrap()
+                .build()
+                .unwrap()
+        }
+
+        let occupied = |count: usize| -> Vec<GameSlot> {
+            (0..count)
+                .map(|i| GameSlot::new(0, 255, SLOTSTATUS_OPEN, 0, 0, i as u8, SLOTRACE_RANDOM, SLOTCOMP_EASY, 100))
+                .collect()
+        };
+
+        for observers in [MAPOBS_ALLOWED, MAPOBS_REFEREES] {
+            let mut map = GameMap::new();
+            map.map_observers = observers;
+            map.slots = occupied(10);
+            map.add_observer_slots(&cfg_with_max_slots(12), 6060);
+
+            assert_eq!(map.slots.len(), 12);
+            // the two added slots are open observer slots, the original ten are untouched
+            for slot in &map.slots[10..] {
+                assert_eq!(slot.slot_status, SLOTSTATUS_OPEN);
+                assert_eq!(slot.team, MAX_SLOTS as u8);
+                assert_eq!(slot.colour, MAX_SLOTS as u8);
+            }
+        }
+
+        // observers disabled: the slot list is left exactly as the config declared it
+        let mut map = GameMap::new();
+        map.map_observers = MAPOBS_NONE;
+        map.slots = occupied(10);
+        map.add_observer_slots(&cfg_with_max_slots(12), 6060);
+        assert_eq!(map.slots.len(), 10);
+
+        // already at or over map_maxslots: nothing is added and the log line does not underflow
+        let mut map = GameMap::new();
+        map.map_observers = MAPOBS_ALLOWED;
+        map.slots = occupied(14);
+        map.add_observer_slots(&cfg_with_max_slots(12), 6060);
+        assert_eq!(map.slots.len(), 14);
+
+        // pre-6060 editor versions default to 12 slots when map_maxslots is absent
+        let mut map = GameMap::new();
+        map.map_observers = MAPOBS_ALLOWED;
+        map.slots = occupied(2);
+        map.add_observer_slots(&Config::default(), 6059);
+        assert_eq!(map.slots.len(), 12);
+
+        let mut map = GameMap::new();
+        map.map_observers = MAPOBS_ALLOWED;
+        map.slots = occupied(2);
+        map.add_observer_slots(&Config::default(), 6060);
+        assert_eq!(map.slots.len(), MAX_SLOTS as usize);
     }
 
     #[test]
