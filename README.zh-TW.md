@@ -72,7 +72,7 @@ cargo build --release
 
 ## 執行前準備
 
-由於版權因素,倉庫**不含**任何暴雪檔案,執行時需自備:
+由於版權因素,倉庫**不含**任何暴雪遊戲檔案,唯一的例外是 `maps/Empty.w3x` 這顆 16KB 的空白地圖,作為測試素材讓 MPQ 解析測試在剛 clone 下來時就能執行。執行時需自備:
 
 1. **`lib/`** — War3 安裝檔(`war3.exe`/`warcraft.exe`、`Storm.dll`、`game.dll`),checkRevision 計算 exe hash 用
 2. **`maps/`** — 要開的地圖檔(`.w3x`/`.w3m`)

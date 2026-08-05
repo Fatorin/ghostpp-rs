@@ -1161,36 +1161,41 @@ mod tests {
     use stormlib::{Archive, OpenArchiveFlags};
     use crate::core::gamemap::*;
 
+    /// Parse war3map.w3i out of a real MPQ archive.
+    ///
+    /// maps/Empty.w3x is a blank 16KB map committed as a fixture (the rest of maps/ is
+    /// gitignored), so this runs on a fresh clone and in CI. It still skips rather than fails
+    /// when the file is missing, since anyone may clear maps/ out on their own machine.
     #[test]
     fn try_read_war3map_i() {
-        let file_path = "maps/FateV1.7N_Fix_CHT.w3x";
-        let mpq_result = Archive::open(
-            file_path,
-            OpenArchiveFlags::MPQ_OPEN_NO_LISTFILE | OpenArchiveFlags::MPQ_OPEN_NO_ATTRIBUTES,
-        );
-
-        if mpq_result.is_err() {
-            panic!("[MAP] warning - unable to load MPQ file [ {} ]", file_path);
+        let file_path = "maps/Empty.w3x";
+        if !std::path::Path::new(file_path).exists() {
+            eprintln!("skipping try_read_war3map_i: fixture [{file_path}] is missing");
+            return;
         }
 
         info!("[MAP] loading MPQ file [ {} ]", file_path);
-        let mut mpq = mpq_result.unwrap();
+        let mut mpq = Archive::open(
+            file_path,
+            OpenArchiveFlags::MPQ_OPEN_NO_LISTFILE | OpenArchiveFlags::MPQ_OPEN_NO_ATTRIBUTES,
+        )
+        .unwrap_or_else(|e| panic!("[MAP] unable to open MPQ file [{file_path}]: {e:?}"));
 
-        let w3i_result = mpq.open_file("war3map.w3i");
-        if w3i_result.is_err() {
-            panic!("[MAP] warning - unable to load MPQ file [ {} ]", file_path);
-        }
+        let mut w3i = mpq
+            .open_file("war3map.w3i")
+            .unwrap_or_else(|e| panic!("[MAP] [{file_path}] has no war3map.w3i: {e:?}"));
+        let data = w3i
+            .read_all()
+            .unwrap_or_else(|e| panic!("[MAP] unable to read war3map.w3i: {e:?}"));
 
-        let mut w3i = w3i_result.unwrap();
-        let data = w3i.read_all();
-        if data.is_err() {
-            panic!("[MAP] warning - unable to load MPQ file [ war3map.i ]")
-        }
-
-        let data = data.unwrap();
-        let result = read_war3map_i(&data);
-
-        assert_eq!(result.is_ok(), true);
+        let info = read_war3map_i(&data).expect("war3map.w3i should parse");
+        // A parsed w3i must at least describe a playable map, not just decode without erroring
+        assert!(
+            info.map_num_players > 0 && info.map_num_players <= MAX_SLOTS,
+            "unexpected player count {}",
+            info.map_num_players
+        );
+        assert!(!info.slots.is_empty(), "w3i declared no slots");
     }
 
     #[test]

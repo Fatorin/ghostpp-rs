@@ -8,7 +8,6 @@ error.log
 
 # Warcraft III copyrighted files (not needed to build; supply locally to run/host)
 /lib
-/maps
 
 # Build / diagnostic junk
 *.log

@@ -72,7 +72,7 @@ cargo build --release
 
 ## Runtime setup
 
-For copyright reasons the repository contains **no** Blizzard files. To run, supply locally:
+For copyright reasons the repository contains **no** Blizzard game files. The one exception is `maps/Empty.w3x`, a blank 16KB map committed as a test fixture so the MPQ parsing test runs on a fresh clone. To run, supply locally:
 
 1. **`lib/`** — War3 installation files (`war3.exe`/`warcraft.exe`, `Storm.dll`, `game.dll`) used by checkRevision to compute the exe hash
 2. **`maps/`** — the map files to host (`.w3x`/`.w3m`)
