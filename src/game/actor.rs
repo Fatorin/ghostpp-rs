@@ -321,7 +321,8 @@ impl GameActor {
         let mut countdown_tick = interval(Duration::from_secs(1));
         countdown_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Action batch beat. Uses sleep_until rather than interval,
-        // so a dynamic !latency adjustment takes effect on the very next beat
+        // so a dynamic !latency adjustment takes effect on the very next beat.
+        // The instant is advanced by schedule_next_beat (see there for the drift compensation)
         let mut next_action =
             tokio::time::Instant::now() + Duration::from_millis(self.latency_ms as u64);
 
@@ -380,8 +381,11 @@ impl GameActor {
                     self.tick_countdown().await;
                 }
                 _ = tokio::time::sleep_until(next_action) => {
-                    next_action = tokio::time::Instant::now()
-                        + Duration::from_millis(self.latency_ms as u64);
+                    next_action = schedule_next_beat(
+                        next_action,
+                        tokio::time::Instant::now(),
+                        Duration::from_millis(self.latency_ms as u64),
+                    );
                     if self.game_loaded {
                         self.game_tick().await;
                     }
@@ -2673,6 +2677,33 @@ fn trim_gproxy_buffer(p: &mut LobbyPlayer, last_packet: u32) {
     }
 }
 
+/// Schedule the next action beat.
+///
+/// Advances from the *scheduled* instant rather than from wake-up time, so a beat that fires
+/// late shortens the next interval and the long-run average stays at `latency`
+/// (mirrors the C++ m_LastActionLateBy compensation, game_base.cpp:1430-1444).
+/// Advancing from wake-up time instead lets the jitter of every beat accumulate: at a 5ms
+/// latency a ~0.5ms overshoot per beat already costs ~10% of the batches per second.
+///
+/// When the actor fell so far behind that the next beat would already be in the past
+/// (starved task, or !latency lowered at runtime), the accumulated debt is dropped and the
+/// beat re-aligns to `now`, so the game never fast-forwards through a burst of catch-up
+/// batches. C++ clamps m_LastActionLateBy to one full m_Latency for the same reason, but
+/// still fires that beat immediately; re-aligning is the calmer choice while starved and
+/// gives up at most one beat.
+fn schedule_next_beat(
+    scheduled: tokio::time::Instant,
+    now: tokio::time::Instant,
+    latency: Duration,
+) -> tokio::time::Instant {
+    let next = scheduled + latency;
+    if next < now {
+        now + latency
+    } else {
+        next
+    }
+}
+
 /// SocketAddr → (external_ip 4 bytes, port 2 bytes).
 /// The port uses big-endian (network order), matching the bytes sent by C++ CSocket::GetPort.
 fn addr_bytes(peer: SocketAddr, hide: bool) -> (Vec<u8>, Vec<u8>) {
@@ -2750,6 +2781,39 @@ mod tests {
             replay_build_number: 6059,
             download_mode: 1,
         }
+    }
+
+    /// The action beat must stay on its original grid despite late wake-ups, and must not
+    /// fire a burst of catch-up beats after the actor has been starved.
+    #[test]
+    fn action_beat_absorbs_late_wakeups_without_bursting() {
+        let latency = Duration::from_millis(5);
+        let start = tokio::time::Instant::now();
+
+        // On time: the next beat lands exactly one latency later
+        assert_eq!(schedule_next_beat(start, start, latency), start + latency);
+
+        // Woke 1ms late: the next beat still lands on the original grid, so the
+        // delay is absorbed rather than pushing every later beat back by 1ms
+        let late = start + Duration::from_millis(1);
+        assert_eq!(schedule_next_beat(start, late, latency), start + latency);
+
+        // 100 consecutive late beats must not drift off the grid (the old
+        // `now() + latency` scheduling drifted 600us per beat = 60ms here)
+        let mut scheduled = start;
+        for i in 1..=100u32 {
+            let woke = scheduled + Duration::from_micros(600);
+            scheduled = schedule_next_beat(scheduled, woke, latency);
+            assert_eq!(scheduled, start + latency * i, "beat {i} drifted off the grid");
+        }
+
+        // Fell behind by 10 full beats: re-align to now instead of firing 10 catch-up
+        // batches back to back (which would fast-forward the game)
+        let starved = start + latency * 10;
+        assert_eq!(
+            schedule_next_beat(start, starved, latency),
+            starved + latency
+        );
     }
 
     fn assign_len(mut p: Vec<u8>) -> Vec<u8> {
