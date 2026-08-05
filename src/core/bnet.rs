@@ -1,7 +1,7 @@
 // Legacy module kept as a C++ porting reference; superseded by bot::bnet (BnetActor).
 #![allow(dead_code)]
 
-use std::{io, usize};
+use std::io;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind};
@@ -68,17 +68,17 @@ pub struct BNet {
 impl BNet {
     pub fn new(config: &Config) -> io::Result<BNet> {
         let prefix = "bnet_";
-        let server: String = config.get_string(&format!("{}server", prefix)).unwrap_or(String::new());
+        let server: String = config.get_string(&format!("{}server", prefix)).unwrap_or_default();
         let addr = get_ipv4_address(&server)?;
-        let mut server_alias: String = config.get_string(&format!("{}serveralias", prefix)).unwrap_or(String::new());
-        let mut cdkey_roc: String = config.get_string(&format!("{}cdkeyroc", prefix)).unwrap_or(String::new());
-        let mut cdkey_tft: String = config.get_string(&format!("{}cdkeytft", prefix)).unwrap_or(String::new());
+        let mut server_alias: String = config.get_string(&format!("{}serveralias", prefix)).unwrap_or_default();
+        let mut cdkey_roc: String = config.get_string(&format!("{}cdkeyroc", prefix)).unwrap_or_default();
+        let mut cdkey_tft: String = config.get_string(&format!("{}cdkeytft", prefix)).unwrap_or_default();
         let country_abbrev: String = config.get_string(&format!("{}countryabbrev", prefix)).unwrap_or(String::from("USA"));
         let country: String = config.get_string(&format!("{}country", prefix)).unwrap_or(String::from("United States"));
         let locale_id: u32 = 1033;
 
-        let user_name: String = config.get_string("username").unwrap_or(String::new());
-        let user_password: String = config.get_string("password").unwrap_or(String::new());
+        let user_name: String = config.get_string("username").unwrap_or_default();
+        let user_password: String = config.get_string("password").unwrap_or_default();
         let first_channel: String = config.get_string("firstchannel").unwrap_or(String::from("The Void"));
         let mut bnetcommand_trigger: String = config.get_string("commandtrigger").unwrap_or(String::from("!"));
 
@@ -87,12 +87,12 @@ impl BNet {
         }
 
         let war3_version: u8 = config.get_int("custom_war3version").unwrap_or(30) as u8;
-        let exe_version: Vec<u8> = util_extract_numbers(&config.get_string("custom_exeversion").unwrap_or(String::new()), 4);
-        let exe_version_hash: Vec<u8> = util_extract_numbers(&config.get_string("custom_exeversionhash").unwrap_or(String::new()), 4);
-        let password_hash_type: String = config.get_string("custom_passwordhashtype").unwrap_or(String::new());
+        let exe_version: Vec<u8> = util_extract_numbers(&config.get_string("custom_exeversion").unwrap_or_default(), 4);
+        let exe_version_hash: Vec<u8> = util_extract_numbers(&config.get_string("custom_exeversionhash").unwrap_or_default(), 4);
+        let password_hash_type: String = config.get_string("custom_passwordhashtype").unwrap_or_default();
 
         if server.is_empty() {
-            return Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), "[BNET] server not found"));
+            return Err(Error::new(ErrorKind::InvalidData, "[BNET] server not found"));
         }
 
         if server_alias.is_empty() {
@@ -101,7 +101,7 @@ impl BNet {
 
         if cdkey_roc.is_empty()
         {
-            return Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), format!(
+            return Err(Error::new(ErrorKind::InvalidData, format!(
                 "[BNET] missing {} cdkeyroc, skipping this battle.net connection", prefix)));
         }
 
@@ -112,7 +112,7 @@ impl BNet {
 
         if cdkey_tft.is_empty()
         {
-            return Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), format!(
+            return Err(Error::new(ErrorKind::InvalidData, format!(
                 "[BNET] missing {} cdkeytft, skipping this battle.net connection", prefix)));
         }
 
@@ -123,13 +123,13 @@ impl BNet {
 
         if user_name.is_empty()
         {
-            return Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), format!(
+            return Err(Error::new(ErrorKind::InvalidData, format!(
                 "[GHOST] missing {} username, skipping this battle.net connection", prefix)));
         }
 
         if user_password.is_empty()
         {
-            return Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), format!(
+            return Err(Error::new(ErrorKind::InvalidData, format!(
                 "[GHOST] missing {} password, skipping this battle.net connection", prefix)));
         }
 
@@ -140,7 +140,7 @@ impl BNet {
         let bncsutil_interface = BNCSUtilInterface::new("", "");
         let time = get_time();
 
-        return Ok(BNet {
+        Ok(BNet {
             gamehost: RefCell::new(Weak::new()),
             socket: gamesocket,
             protocol: BNetProtocol::new(),
@@ -181,7 +181,7 @@ impl BNet {
             logged_in: false,
             in_chat: false,
             pvpgn: is_pvpgn,
-        });
+        })
     }
 
     pub fn update(&mut self) -> bool {
@@ -464,7 +464,7 @@ impl BNet {
             info!("[BNET: {}] connecting to server to address [ {}]", self.server_alias, self.server.to_string());
 
 
-            if let Ok(_) = self.socket.connect(self.server_addr) {
+            if self.socket.connect(self.server_addr).is_ok() {
                 info!("[BNET: {}] resolved and cached server IP address {}", self.server_alias, self.server.to_string());
             }
 
@@ -499,7 +499,7 @@ impl BNet {
                 self.exiting
             };
         }
-        return self.exiting;
+        self.exiting
     }
 
     pub fn process_chat_event(&self, chat_event: IncomingChatEvent) {
@@ -621,12 +621,8 @@ impl BNet {
             }
 
             // use an invalid map width/height to indicate reconnectable games
-            let mut map_width: Vec<u8> = vec![];
-            map_width.push(192);
-            map_width.push(7);
-            let mut map_height: Vec<u8> = vec![];
-            map_height.push(192);
-            map_height.push(7);
+            let map_width: Vec<u8> = vec![192, 7];
+            let map_height: Vec<u8> = vec![192, 7];
 
             self.out_packets.push_back(
                 self.protocol.send_sid_startadvex3(

@@ -78,7 +78,6 @@ impl GameSocket {
     pub fn get_ip_string(&self) -> String {
         if let Some(socket) = &self.socket {
             socket.peer_addr()
-                .and_then(|addr| Ok(addr))
                 .map_or(String::new(), |addr| addr.ip().to_string())
         } else {
             String::new()

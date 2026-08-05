@@ -932,8 +932,7 @@ impl GameActor {
 
         match id {
             W3GS_CHAT_TO_HOST => {
-                let owned = data.to_vec();
-                if let Some(chat) = GameProtocol::receive_w3gs_chat_to_host(&owned) {
+                if let Some(chat) = GameProtocol::receive_w3gs_chat_to_host(data) {
                     match chat.flag {
                         // 16 = lobby text message, 32 = in-game text message: report to BotCore for command parsing and forwarding
                         16 | 32 => {
@@ -981,14 +980,12 @@ impl GameActor {
                 }
             }
             W3GS_MAPSIZE => {
-                let owned = data.to_vec();
-                if let Some(ms) = GameProtocol::receive_w3gs_mapsize(&owned) {
+                if let Some(ms) = GameProtocol::receive_w3gs_mapsize(data) {
                     self.handle_map_size(pid, ms.size_flag, ms.map_size).await;
                 }
             }
             W3GS_MAPPARTOK => {
-                let owned = data.to_vec();
-                let acked = GameProtocol::receive_w3gs_mappartok(&owned);
+                let acked = GameProtocol::receive_w3gs_mappartok(data);
                 if let Some(p) = self.players.get_mut(&pid) {
                     if acked > p.last_part_acked {
                         p.last_part_acked = acked;
@@ -999,8 +996,7 @@ impl GameActor {
             W3GS_PONG_TO_HOST => {
                 // pong = the get_ticks we embedded when sending PING; RTT = now - pong (mirrors C++)
                 // The first pong is often 1, discard it; also filter out overly large RTTs (wrapping/anomalies)
-                let owned = data.to_vec();
-                let pong = GameProtocol::receive_w3gs_pong_to_host(&owned);
+                let pong = GameProtocol::receive_w3gs_pong_to_host(data);
                 if pong != 1 {
                     let rtt = (get_ticks() as u32).wrapping_sub(pong);
                     if rtt < 60_000 {
@@ -1014,22 +1010,19 @@ impl GameActor {
                 }
             }
             W3GS_GAMELOADED_SELF => {
-                let owned = data.to_vec();
-                if GameProtocol::receive_w3gs_gameloaded_self(&owned) {
+                if GameProtocol::receive_w3gs_gameloaded_self(data) {
                     self.handle_player_loaded(pid).await;
                 }
             }
             W3GS_OUTGOING_ACTION => {
                 if self.game_loaded {
-                    let owned = data.to_vec();
-                    if let Some(action) = GameProtocol::receive_w3gs_outgoing_action(&owned, pid) {
+                    if let Some(action) = GameProtocol::receive_w3gs_outgoing_action(data, pid) {
                         self.actions.push_back(action);
                     }
                 }
             }
             W3GS_OUTGOING_KEEPALIVE => {
-                let owned = data.to_vec();
-                let checksum = GameProtocol::receive_w3gs_outgoing_keepalive(&owned);
+                let checksum = GameProtocol::receive_w3gs_outgoing_keepalive(data);
                 let mut first = false;
                 if let Some(p) = self.players.get_mut(&pid) {
                     p.sync_counter += 1;
@@ -1047,8 +1040,7 @@ impl GameActor {
                 self.check_desync().await;
             }
             W3GS_LEAVEGAME => {
-                let owned = data.to_vec();
-                let reason = GameProtocol::receive_w3gs_leavegame(&owned);
+                let reason = GameProtocol::receive_w3gs_leavegame(data);
                 info!("[GAME: {}] pid={pid} sent LEAVEGAME (reason={reason})", self.cfg.game_name);
                 self.remove_player(pid, reason).await;
             }
@@ -1100,10 +1092,10 @@ impl GameActor {
             let mut longest: Option<(String, u64)> = None;
             for p in self.players.values() {
                 let t = p.finished_loading_ticks;
-                if shortest.as_ref().map_or(true, |s| t < s.1) {
+                if shortest.as_ref().is_none_or(|s| t < s.1) {
                     shortest = Some((p.name.clone(), t));
                 }
-                if longest.as_ref().map_or(true, |l| t > l.1) {
+                if longest.as_ref().is_none_or(|l| t > l.1) {
                     longest = Some((p.name.clone(), t));
                 }
             }

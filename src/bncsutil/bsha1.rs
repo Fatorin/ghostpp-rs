@@ -30,9 +30,9 @@ pub fn calc_hash_buf(input: &[u8]) -> [u8; 20] {
     bytes[..n].copy_from_slice(&input[..n]);
 
     let mut ldata = [0u32; 256];
-    for i in 0..256 {
+    for (i, word) in ldata.iter_mut().enumerate() {
         let b = i * 4;
-        ldata[i] = u32::from_le_bytes([bytes[b], bytes[b + 1], bytes[b + 2], bytes[b + 3]]);
+        *word = u32::from_le_bytes([bytes[b], bytes[b + 1], bytes[b + 2], bytes[b + 3]]);
     }
 
     // Data expansion: ldata[i+16] = ROL(1, (ldata[i]^ldata[i+8]^ldata[i+2]^ldata[i+13]) % 32)

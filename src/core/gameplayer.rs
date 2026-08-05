@@ -174,22 +174,19 @@ impl GamePlayer {
         // if we don't receive anything from a player for 30 seconds we can assume they've dropped
         // this works because in the lobby we send pings every 5 seconds and expect a response to each one
         // and in the game the Warcraft 3 client sends keepalives frequently (at least once per second it looks like)
-        if self.socket.is_connected {
-            if get_time() - self.last_recv_time >= 30u64 {
+        if self.socket.is_connected
+            && get_time() - self.last_recv_time >= 30u64 {
                 // m_Game->EventPlayerDisconnectTimedOut( this );
 
                 unimplemented!();
             }
-        }
 
         // GProxy++ acks
         if self.gproxy && get_time() - self.last_gproxy_ack_time >= 10u64
-        {
-            if self.socket.is_connected {
+            && self.socket.is_connected {
                 self.socket.put_bytes(send_gpss_ack(self.total_packets_received as u32));
                 self.last_gproxy_ack_time = get_time();
             }
-        }
 
         // base class update, received packet
         let _received_result = self.socket.received(); // Triggers a disconnect event on failure
@@ -222,7 +219,7 @@ impl GamePlayer {
             }
         }
 
-        return deleting;
+        deleting
     }
 
     pub fn internal_update(&mut self) -> bool {
@@ -271,13 +268,13 @@ impl GamePlayer {
             avg_ping += ping;
         }
 
-        avg_ping = avg_ping / self.pings.len() as u32;
+        avg_ping /= self.pings.len() as u32;
 
-        return if lcp_ping {
+        if lcp_ping {
             avg_ping / 2
         } else {
             avg_ping
-        };
+        }
     }
 
     pub fn add_load_in_game_data(&mut self, load_in_game_data: Vec<u8>) {
@@ -380,7 +377,7 @@ impl GamePlayer {
 
             while packets_to_unqueue > 0
             {
-                if let Some(_) = self.gproxy_buffer.pop_back() {
+                if self.gproxy_buffer.pop_back().is_some() {
                     packets_to_unqueue -= 1;
                 }
             }

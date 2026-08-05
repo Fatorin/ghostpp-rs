@@ -115,6 +115,12 @@ pub struct GameMap {
     pub slots: Vec<GameSlot>,
 }
 
+impl Default for GameMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GameMap {
     pub fn new() -> Self {
         info!("[MAP] using hardcoded Emerald Gardens map data for Warcraft 3 version 1.24 & 1.24b");
@@ -302,7 +308,7 @@ impl GameMap {
             return 1;
         }
 
-        return 3;
+        3
     }
 
     pub fn get_map_width(&self) -> &Vec<u8> {
@@ -413,7 +419,7 @@ impl GameMap {
         if !mpq_path.is_empty() {
             // Fix: .w3x is a binary file; the original read_to_string would always fail UTF-8 and return an empty string,
             // causing map_size / map_info to be entirely wrong and map download to be unusable
-            map_data = std::fs::read(&mpq_path).unwrap_or_else(|_| {
+            map_data = std::fs::read(mpq_path).unwrap_or_else(|_| {
                 warn!("[MAP] warning - unable to read map file [{}]", mpq_path);
                 vec![]
             });
@@ -425,7 +431,7 @@ impl GameMap {
         self.map_data_len = map_data.len();
 
         let mpq_result = Archive::open(
-            &mpq_path,
+            mpq_path,
             OpenArchiveFlags::MPQ_OPEN_NO_LISTFILE | OpenArchiveFlags::MPQ_OPEN_NO_ATTRIBUTES,
         );
 
@@ -477,13 +483,13 @@ impl GameMap {
                 if let Ok(data) = override_common_j.read_all() {
                     info!("[MAP] overriding default common.j with map copy while calculating map_crc/sha1");
                     overrode_common_j = true;
-                    val = val ^ Self::xor_rotate_left(&data, data.len());
+                    val ^= Self::xor_rotate_left(&data, data.len());
                     Update::update(&mut sha1, &data);
                 }
             }
 
             if !overrode_common_j {
-                val = val ^ Self::xor_rotate_left(common_j.as_bytes(), common_j.len());
+                val ^= Self::xor_rotate_left(common_j.as_bytes(), common_j.len());
                 Update::update(&mut sha1, common_j.as_bytes());
             }
 
@@ -491,13 +497,13 @@ impl GameMap {
                 if let Ok(data) = override_blizzard_j.read_all() {
                     info!("[MAP] overriding default blizzard.j with map copy while calculating map_crc/sha1");
                     overrode_blizzard_j = true;
-                    val = val ^ Self::xor_rotate_left(&data, data.len());
+                    val ^= Self::xor_rotate_left(&data, data.len());
                     Update::update(&mut sha1, &data);
                 }
             }
 
             if !overrode_blizzard_j {
-                val = val ^ Self::xor_rotate_left(blizzard_j.as_bytes(), blizzard_j.len());
+                val ^= Self::xor_rotate_left(blizzard_j.as_bytes(), blizzard_j.len());
                 Update::update(&mut sha1, blizzard_j.as_bytes());
             }
 
@@ -505,17 +511,19 @@ impl GameMap {
             val = rotl(val ^ 0x03F1379E, 3);
             Update::update(&mut sha1, &[0x9E, 0x37, 0xF1, 0x03]);
 
-            let mut file_list: Vec<&str> = vec![];
-            file_list.push("war3map.j");
-            file_list.push("scripts\\war3map.j");
-            file_list.push("war3map.w3e");
-            file_list.push("war3map.wpm");
-            file_list.push("war3map.doo");
-            file_list.push("war3map.w3u");
-            file_list.push("war3map.w3b");
-            file_list.push("war3map.w3d");
-            file_list.push("war3map.w3a");
-            file_list.push("war3map.w3q");
+            // hashed in this exact order (mirrors C++ CMap::Load)
+            let file_list: Vec<&str> = vec![
+                "war3map.j",
+                "scripts\\war3map.j",
+                "war3map.w3e",
+                "war3map.wpm",
+                "war3map.doo",
+                "war3map.w3u",
+                "war3map.w3b",
+                "war3map.w3d",
+                "war3map.w3a",
+                "war3map.w3q",
+            ];
 
             let mut found_script = false;
 
@@ -578,7 +586,7 @@ impl GameMap {
 
         // update map_info from config.
         let cfg_map_info = cfg.get_string("map_info").unwrap_or("".to_string());
-        if map_info.len() == 0 || !cfg_map_info.is_empty() {
+        if map_info.is_empty() || !cfg_map_info.is_empty() {
             info!("[MAP] overriding calculated map_info with config value map_info = {}", cfg_map_info);
             map_info = util_extract_numbers(&cfg_map_info, 4);
         }
@@ -586,7 +594,7 @@ impl GameMap {
 
         // update map_crc from config.
         let cfg_map_crc = cfg.get_string("map_crc").unwrap_or("".to_string());
-        if map_crc.len() == 0 || !cfg_map_crc.is_empty() {
+        if map_crc.is_empty() || !cfg_map_crc.is_empty() {
             info!("[MAP] overriding calculated map_crc with config value map_crc = {}", cfg_map_crc);
             map_crc = util_extract_numbers(&cfg_map_crc, 4);
         }
@@ -594,19 +602,19 @@ impl GameMap {
 
         // update map_sha1 from config.
         let cfg_map_sh1 = cfg.get_string("map_sha1").unwrap_or("".to_string());
-        if map_sha1.len() == 0 || !cfg_map_sh1.is_empty() {
+        if map_sha1.is_empty() || !cfg_map_sh1.is_empty() {
             info!("[MAP] overriding calculated map_sha1 with config value map_sha1 = {cfg_map_sh1}");
             map_sha1 = util_extract_numbers(&cfg_map_sh1, 20);
         }
         self.map_sha1 = map_sha1;
 
         // update other settings.
-        self.map_speed = get_u8_from_config(&cfg, "map_speed", MAPSPEED_FAST);
-        self.map_visibility = get_u8_from_config(&cfg, "map_visibility", MAPVIS_DEFAULT);
-        self.map_observers = get_u8_from_config(&cfg, "map_observers", MAPOBS_NONE);
+        self.map_speed = get_u8_from_config(cfg, "map_speed", MAPSPEED_FAST);
+        self.map_visibility = get_u8_from_config(cfg, "map_visibility", MAPVIS_DEFAULT);
+        self.map_observers = get_u8_from_config(cfg, "map_observers", MAPOBS_NONE);
 
-        self.map_flags = get_u8_from_config(&cfg, "map_flags", MAPFLAG_TEAMSTOGETHER | MAPFLAG_FIXEDTEAMS);
-        self.map_filter_maker = get_u8_from_config(&cfg, "map_filter_maker", MAPFILTER_MAKER_USER);
+        self.map_flags = get_u8_from_config(cfg, "map_flags", MAPFLAG_TEAMSTOGETHER | MAPFLAG_FIXEDTEAMS);
+        self.map_filter_maker = get_u8_from_config(cfg, "map_filter_maker", MAPFILTER_MAKER_USER);
 
         let cfg_map_filter_type = cfg.get_int("map_filter_type");
         if cfg_map_filter_type.is_ok()
@@ -647,12 +655,12 @@ impl GameMap {
         self.map_matchmaking_category = cfg.get_string("map_matchmakingcategory").unwrap_or("".to_string());
         self.map_stats_w3mmd_category = cfg.get_string("map_statsw3mmdcategory").unwrap_or("".to_string());
         self.map_default_hcl = cfg.get_string("map_defaulthcl").unwrap_or("".to_string());
-        self.map_default_player_score = get_u32_from_config(&cfg, "map_defaultplayerscore", 1000);
+        self.map_default_player_score = get_u32_from_config(cfg, "map_defaultplayerscore", 1000);
         self.map_load_in_game = cfg.get_int("map_loadingame").unwrap_or(0) != 0;
 
         let cfg_map_numplayers = cfg.get_int("map_numplayers");
         if w3i.map_num_players == 0 || cfg_map_numplayers.is_ok() {
-            let cfg_map_numplayers = get_u32_from_config(&cfg, "map_numplayers", 0);
+            let cfg_map_numplayers = get_u32_from_config(cfg, "map_numplayers", 0);
             info!("[MAP] overriding calculated map_numplayers with config value map_numplayers = {}", cfg_map_numplayers);
             w3i.map_num_players = cfg_map_numplayers;
         }
@@ -660,14 +668,14 @@ impl GameMap {
 
         let cfg_map_num_teams = cfg.get_int("map_numteams");
         if w3i.map_num_teams == 0 || cfg_map_num_teams.is_ok() {
-            let cfg_map_num_teams = get_u32_from_config(&cfg, "map_numteams", 0);
+            let cfg_map_num_teams = get_u32_from_config(cfg, "map_numteams", 0);
             info!("[MAP] overriding calculated map_numplayers with config value map_numteams = {}", cfg_map_num_teams);
             w3i.map_num_teams = cfg_map_num_teams;
         }
         self.map_num_teams = w3i.map_num_teams;
 
         let cfg_slot = cfg.get_string("map_slot1");
-        if w3i.slots.len() == 0 || cfg_slot.is_ok() {
+        if w3i.slots.is_empty() || cfg_slot.is_ok() {
             w3i.slots.clear();
             for i in 0..MAX_SLOTS
             {
@@ -783,7 +791,7 @@ impl GameMap {
             }
         }
 
-        if !(self.map_flags <= (MAPFLAG_TEAMSTOGETHER | MAPFLAG_FIXEDTEAMS | MAPFLAG_UNITSHARE | MAPFLAG_RANDOMHERO | MAPFLAG_RANDOMRACES)) {
+        if self.map_flags > (MAPFLAG_TEAMSTOGETHER | MAPFLAG_FIXEDTEAMS | MAPFLAG_UNITSHARE | MAPFLAG_RANDOMHERO | MAPFLAG_RANDOMRACES)  {
             self.is_valid = false;
             warn!("[MAP] invalid map_flags detected = {}", self.map_flags);
         }
@@ -873,22 +881,26 @@ impl GameMap {
 }
 
 fn rotl(x: u32, n: u32) -> u32 {
-    (x << n) | (x >> (32 - n))
+    x.rotate_left(n)
 }
 
 #[allow(dead_code)] // Counterpart of a C++ util function, kept for future use
 fn rotr(x: u32, n: u32) -> u32 {
-    (x >> n) | (x << (32 - n))
+    x.rotate_right(n)
 }
 
 fn read_null_terminated_string<R: Read>(reader: &mut R) -> io::Result<String> {
     let mut buf = Vec::new();
-    for byte in reader.bytes() {
-        let byte = byte?;
-        if byte == 0 {
+    // One byte at a time is fine here: callers pass an in-memory Cursor over the already
+    // extracted w3i blob, so there is no syscall per byte for clippy to worry about.
+    // read() == 0 means EOF and ends the string, matching the bytes() iterator this replaced -
+    // a truncated w3i returns what was read rather than erroring.
+    let mut byte = [0u8; 1];
+    loop {
+        if reader.read(&mut byte)? == 0 || byte[0] == 0 {
             break;
         }
-        buf.push(byte);
+        buf.push(byte[0]);
     }
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
@@ -908,7 +920,7 @@ struct War3mapInfo {
 fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     let mut cursor = Cursor::new(data);
 
-    let editor_version: u32; // used to determine maximum slots when adding observers
+     // used to determine maximum slots when adding observers
     let mut map_options: u32 = 0;
     let mut map_width: Vec<u8> = vec![];
     let mut map_height: Vec<u8> = vec![];
@@ -917,11 +929,11 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     let mut map_filter_type = MAPFILTER_TYPE_SCENARIO;
     let mut slots: Vec<GameSlot> = vec![];
 
-    let raw_map_width: u32;
-    let raw_map_height: u32;
-    let raw_map_flags: u32;
-    let raw_map_num_players: u32;
-    let raw_map_num_teams: u32;
+    
+    
+    
+    
+    
 
     let file_format = cursor.read_u32::<LittleEndian>()?;
 
@@ -933,7 +945,7 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
 
     cursor.seek(SeekFrom::Current(4))?;
 
-    editor_version = cursor.read_u32::<LittleEndian>()?;
+    let editor_version: u32 = cursor.read_u32::<LittleEndian>()?;
     info!("editor_version: {}", editor_version);
 
     // map name
@@ -949,11 +961,11 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     // camera bounds complements
     cursor.seek(SeekFrom::Current(16))?;
     // map width
-    raw_map_width = cursor.read_u32::<LittleEndian>()?;
+    let raw_map_width: u32 = cursor.read_u32::<LittleEndian>()?;
     // map height
-    raw_map_height = cursor.read_u32::<LittleEndian>()?;
+    let raw_map_height: u32 = cursor.read_u32::<LittleEndian>()?;
     // flags
-    raw_map_flags = cursor.read_u32::<LittleEndian>()?;
+    let raw_map_flags: u32 = cursor.read_u32::<LittleEndian>()?;
     // map main ground type
     cursor.seek(SeekFrom::Current(1))?;
 
@@ -1026,7 +1038,7 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     }
 
     // number of players
-    raw_map_num_players = cursor.read_u32::<LittleEndian>()?;
+    let raw_map_num_players: u32 = cursor.read_u32::<LittleEndian>()?;
 
     let mut closed_slots: u32 = 0;
     for _ in 0..raw_map_num_players {
@@ -1078,7 +1090,7 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     }
 
     // number of teams
-    raw_map_num_teams = cursor.read_u32::<LittleEndian>()?;
+    let raw_map_num_teams: u32 = cursor.read_u32::<LittleEndian>()?;
     for i in (0..raw_map_num_teams).map(|i| i as u8) {
         // flags
         cursor.read_u32::<LittleEndian>()?;
@@ -1114,10 +1126,8 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     map_num_teams = raw_map_num_teams;
     info!("[MAP] calculated map_numteams = {}", map_num_teams);
 
-    let mut slot_num: u32 = 1;
-    for _slot in slots.iter() {
-        info!("[MAP] calculated map_slot {} ={}", slot_num, util_byte_array_to_dec_string(&_slot.get_byte_array()));
-        slot_num += 1;
+    for (slot_num, slot) in slots.iter().enumerate() {
+        info!("[MAP] calculated map_slot {} ={}", slot_num + 1, util_byte_array_to_dec_string(&slot.get_byte_array()));
     }
 
     if (map_options & MAPOPT_MELEE) != 0
@@ -1140,7 +1150,7 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     {
         // make races selectable
         for mut _slot in slots.iter_mut() {
-            _slot.race = _slot.race | SLOTRACE_SELECTABLE;
+            _slot.race |= SLOTRACE_SELECTABLE;
         }
     }
 
@@ -1313,6 +1323,6 @@ mod tests {
         let mut gamemap = GameMap::new();
         gamemap.load(&settings);
         gamemap.check_valid();
-        assert_eq!(gamemap.is_valid, true);
+        assert!(gamemap.is_valid);
     }
 }

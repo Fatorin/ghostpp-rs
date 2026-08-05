@@ -88,7 +88,7 @@ impl GameProtocol {
         // 2 bytes					-> InternalPort (???)
         // 4 bytes					-> InternalIP
 
-        if validate_length(&data) && data.len() >= 20 {
+        if validate_length(data) && data.len() >= 20 {
             let host_counter = util_byte_array_to_u32(data, false, 4);
             let entry_key = util_byte_array_to_u32(data, false, 8);
             let name = util_extract_cstring(data, 19);
@@ -108,7 +108,7 @@ impl GameProtocol {
         None
     }
 
-    pub fn receive_w3gs_leavegame(data: &Vec<u8>) -> u32 {
+    pub fn receive_w3gs_leavegame(data: &[u8]) -> u32 {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 4 bytes					-> Reason
@@ -116,16 +116,16 @@ impl GameProtocol {
             return util_byte_array_to_u32(data, false, 4);
         }
 
-        return 0;
+        0
     }
 
-    pub fn receive_w3gs_gameloaded_self(data: &Vec<u8>) -> bool {
+    pub fn receive_w3gs_gameloaded_self(data: &[u8]) -> bool {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
-        return validate_length(data);
+        validate_length(data)
     }
 
-    pub fn receive_w3gs_outgoing_action(data: &Vec<u8>, pid: u8) -> Option<IncomingAction> {
+    pub fn receive_w3gs_outgoing_action(data: &[u8], pid: u8) -> Option<IncomingAction> {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 4 bytes					-> CRC
@@ -144,7 +144,7 @@ impl GameProtocol {
         None
     }
 
-    pub fn receive_w3gs_outgoing_keepalive(data: &Vec<u8>) -> u32 {
+    pub fn receive_w3gs_outgoing_keepalive(data: &[u8]) -> u32 {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 1 byte					-> ???
@@ -154,10 +154,10 @@ impl GameProtocol {
             return util_byte_array_to_u32(data, false, 5);
         }
 
-        return 0;
+        0
     }
 
-    pub fn receive_w3gs_chat_to_host(data: &Vec<u8>) -> Option<IncomingChatPlayer> {
+    pub fn receive_w3gs_chat_to_host(data: &[u8]) -> Option<IncomingChatPlayer> {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 1 byte					-> Total
@@ -184,7 +184,7 @@ impl GameProtocol {
             let mut i: usize = 5;
             let total: usize = data[4] as usize;
 
-            if total > 0 && total <= MAX_SLOTS as usize && data.len() >= (i + total).into()
+            if total > 0 && total <= MAX_SLOTS as usize && data.len() >= (i + total)
             {
                 let to_pids = data[i..i + total].to_vec();
                 i += total;
@@ -192,12 +192,12 @@ impl GameProtocol {
                 let flag: u8 = data[i + 1];
                 i += 2;
 
-                if flag == 16 && data.len() >= i + 1
+                if flag == 16 && data.len() > i
                 {
                     // chat message
                     let message = util_extract_cstring(data, i);
                     return Some(IncomingChatPlayer::new_message(from_pid, to_pids, flag, message));
-                } else if flag >= 17 && flag <= 20 && data.len() >= i + 1
+                } else if (17..=20).contains(&flag) && data.len() > i
                 {
                     // team/colour/race/handicap change request: flag is immediately followed by a 1-byte value
                     return Some(IncomingChatPlayer::new_with_flag(from_pid, to_pids, flag, data[i]));
@@ -214,7 +214,7 @@ impl GameProtocol {
         None
     }
 
-    pub fn receive_w3gs_searchgame(data: &Vec<u8>, version: u32) -> bool {
+    pub fn receive_w3gs_searchgame(data: &[u8], version: u32) -> bool {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 4 bytes					-> ProductID
@@ -224,22 +224,16 @@ impl GameProtocol {
         let product_id: u32 = 1462982736;    // "W3XP"
 
         if validate_length(data) && data.len() >= 16
-        {
-            if util_byte_array_to_u32(data, false, 4) == product_id
-            {
-                if util_byte_array_to_u32(data, false, 8) == version
-                {
-                    if util_byte_array_to_u32(data, false, 12) == 0 {
+            && util_byte_array_to_u32(data, false, 4) == product_id
+                && util_byte_array_to_u32(data, false, 8) == version
+                    && util_byte_array_to_u32(data, false, 12) == 0 {
                         return true;
                     }
-                }
-            }
-        }
 
-        return false;
+        false
     }
 
-    pub fn receive_w3gs_mapsize(data: &Vec<u8>) -> Option<IncomingMapSize> {
+    pub fn receive_w3gs_mapsize(data: &[u8]) -> Option<IncomingMapSize> {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 4 bytes					-> ???
@@ -253,10 +247,10 @@ impl GameProtocol {
             });
         }
 
-        return None;
+        None
     }
 
-    pub fn receive_w3gs_mappartok(data: &Vec<u8>) -> u32 {
+    pub fn receive_w3gs_mappartok(data: &[u8]) -> u32 {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 1 byte					-> SenderPID
@@ -267,10 +261,10 @@ impl GameProtocol {
             return util_byte_array_to_u32(data, false, 10);
         }
 
-        return 0;
+        0
     }
 
-    pub fn receive_w3gs_pong_to_host(data: &Vec<u8>) -> u32 {
+    pub fn receive_w3gs_pong_to_host(data: &[u8]) -> u32 {
         // 2 bytes					-> Header
         // 2 bytes					-> Length
         // 4 bytes					-> Pong
@@ -283,27 +277,20 @@ impl GameProtocol {
             return util_byte_array_to_u32(data, false, 4);
         }
 
-        return 1;
+        1
     }
 
     pub fn send_w3gs_ping_from_host() -> Vec<u8> {
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_PING_FROM_HOST
-        packet.push(W3GS_PING_FROM_HOST);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_PING_FROM_HOST, 0, 0];
         // ping value: must be u32 (4 bytes); get_ticks() is u64, and calling to_le_bytes directly would send 8 bytes
         // causing the client to receive a malformed PING and drop the connection (mirrors C++ GetTicks() returning uint32_t)
         packet.extend((get_ticks() as u32).to_le_bytes());
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
-    pub fn send_w3gs_slotinfojoin(pid: u8, port: Vec<u8>, external_ip: Vec<u8>, slots: &Vec<GameSlot>, random_seed: u32, layout_style: u8, player_slots: u8) -> Vec<u8> {
+    pub fn send_w3gs_slotinfojoin(pid: u8, port: Vec<u8>, external_ip: Vec<u8>, slots: &[GameSlot], random_seed: u32, layout_style: u8, player_slots: u8) -> Vec<u8> {
         let zeros: [u8; 4] = [0, 0, 0, 0];
 
         let slot_info: Vec<u8> = Self::encode_slot_info(slots, random_seed, layout_style, player_slots);
@@ -342,23 +329,16 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_SLOTINFOJOIN");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_rejectjoin(reason: u32) -> Vec<u8> {
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_REJECTJOIN
-        packet.push(W3GS_REJECTJOIN);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_REJECTJOIN, 0, 0];
         // reason
         packet.extend(reason.to_le_bytes());
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_playerinfo(pid: u8, name: String, external_ip: Vec<u8>, internal_ip: Vec<u8>) -> Vec<u8> {
@@ -421,7 +401,7 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_PLAYERINFO");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_playerleave_others(pid: u8, left_code: u32) -> Vec<u8> {
@@ -446,7 +426,7 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_PLAYERLEAVE_OTHERS");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_gameloaded_others(pid: u8) -> Vec<u8> {
@@ -469,58 +449,38 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_GAMELOADED_OTHERS");
         }
 
-        return packet;
+        packet
     }
 
-    pub fn send_w3gs_slotinfo(slots: &Vec<GameSlot>, random_seed: u32, layout_style: u8, player_slots: u8) -> Vec<u8> {
+    pub fn send_w3gs_slotinfo(slots: &[GameSlot], random_seed: u32, layout_style: u8, player_slots: u8) -> Vec<u8> {
         let slot_info = Self::encode_slot_info(slots, random_seed, layout_style, player_slots);
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_SLOTINFO
-        packet.push(W3GS_SLOTINFO);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_SLOTINFO, 0, 0];
         // SlotInfo length
         packet.extend((slot_info.len() as u16).to_le_bytes());
         // SlotInfo
         packet.extend(slot_info);
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_countdown_start() -> Vec<u8> {
-        let mut packet = vec![];
-        packet.push(W3GS_HEADER_CONSTANT);        // W3GS header constant
-        packet.push(W3GS_COUNTDOWN_START);        // W3GS_COUNTDOWN_START
-        packet.push(0);                            // packet length will be assigned later
-        packet.push(0);                            // packet length will be assigned later
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_COUNTDOWN_START, 0, 0];
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_countdown_end() -> Vec<u8> {
-        let mut packet = vec![];
-        packet.push(W3GS_HEADER_CONSTANT);        // W3GS header constant
-        packet.push(W3GS_COUNTDOWN_END);            // W3GS_COUNTDOWN_END
-        packet.push(0);                            // packet length will be assigned later
-        packet.push(0);                            // packet length will be assigned later
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_COUNTDOWN_END, 0, 0];
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_incoming_action(actions: &mut VecDeque<IncomingAction>, send_interval: u16) -> Vec<u8> {
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_INCOMING_ACTION
-        packet.push(W3GS_INCOMING_ACTION);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_INCOMING_ACTION, 0, 0];
         // send interval
         packet.extend(send_interval.to_le_bytes());
 
@@ -528,7 +488,7 @@ impl GameProtocol {
         let subpacket: Vec<u8> = Self::incoming_action_subpacket(actions);
         Self::extend_incoming_action_subpacket(&mut packet, &subpacket);
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_chat_from_host(from_pid: u8, to_pids: Vec<u8>, flag: u8, flag_extra: Vec<u8>, message: String) -> Vec<u8> {
@@ -560,7 +520,7 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_CHAT_FROM_HOST");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_start_lag(players: &Vec<GamePlayer>, load_in_game: bool) -> Vec<u8> {
@@ -615,15 +575,12 @@ impl GameProtocol {
             warn!("[GAMEPROTO] no laggers passed to SEND_W3GS_START_LAG");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_stop_lag(player: &GamePlayer, load_in_game: bool) -> Vec<u8> {
-        let mut packet = vec![];
-        packet.push(W3GS_HEADER_CONSTANT);    // W3GS header constant
-        packet.push(W3GS_STOP_LAG);            // W3GS_STOP_LAG
-        packet.push(0);                        // packet length will be assigned later
-        packet.push(0);                        // packet length will be assigned later
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_STOP_LAG, 0, 0];
         packet.push(player.pid);
 
         if load_in_game {
@@ -634,7 +591,7 @@ impl GameProtocol {
         }
 
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_searchgame(tft: bool, war3_version: u8) -> Vec<u8> {
@@ -645,15 +602,8 @@ impl GameProtocol {
         let version: [u8; 4] = [war3_version, 0, 0, 0];
         let unknown: [u8; 4] = [0, 0, 0, 0];
 
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_SEARCHGAME
-        packet.push(W3GS_SEARCHGAME);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_SEARCHGAME, 0, 0];
 
         if tft {
             // Product ID (TFT)
@@ -667,9 +617,11 @@ impl GameProtocol {
         // ???
         packet.extend(unknown);
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
+    // mirrors the C++ CGameProtocol::SEND_W3GS_GAMEINFO signature field for field, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     pub fn send_w3gs_gameinfo(
         tft: bool, war3_version: u8, map_game_type: Vec<u8>, map_flags: Vec<u8>,
         map_width: Vec<u8>, map_height: Vec<u8>, game_name: String, host_name: String,
@@ -759,7 +711,7 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_GAMEINFO");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_creategame(tft: bool, war3_version: u8) -> Vec<u8> {
@@ -769,15 +721,8 @@ impl GameProtocol {
         let version: [u8; 4] = [war3_version, 0, 0, 0];
         let host_counter: [u8; 4] = [1, 0, 0, 0];
 
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_CREATEGAME
-        packet.push(W3GS_CREATEGAME);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_CREATEGAME, 0, 0];
 
         if tft {
             // Product ID (TFT)
@@ -792,21 +737,14 @@ impl GameProtocol {
         // Host Counter
         packet.extend(host_counter);
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_refreshgame(players: u32, player_slots: u32) -> Vec<u8> {
         let host_counter = [1, 0, 0, 0];
 
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_REFRESHGAME
-        packet.push(W3GS_REFRESHGAME);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_REFRESHGAME, 0, 0];
         // Host Counter
         packet.extend(host_counter);
         // Players
@@ -814,25 +752,18 @@ impl GameProtocol {
         // Player Slots
         packet.extend(player_slots.to_le_bytes());
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_decreategame() -> Vec<u8> {
         let host_counter = [1, 0, 0, 0];
 
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_DECREATEGAME
-        packet.push(W3GS_DECREATEGAME);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_DECREATEGAME, 0, 0];
         // Host Counter
         packet.extend(host_counter);
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_mapcheck(
@@ -874,27 +805,20 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_MAPCHECK");
         }
 
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_startdownload(from_pid: u8) -> Vec<u8> {
         let unknown = [1, 0, 0, 0];
 
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_STARTDOWNLOAD
-        packet.push(W3GS_STARTDOWNLOAD);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_STARTDOWNLOAD, 0, 0];
         // ???
         packet.extend(unknown);
         // from PID
         packet.push(from_pid);
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
     pub fn send_w3gs_mappart(from_pid: u8, to_pid: u8, start: usize, map_data: &[u8]) -> Vec<u8> {
@@ -943,7 +867,7 @@ impl GameProtocol {
             warn!("[GAMEPROTO] invalid parameters passed to SEND_W3GS_MAPPART");
         }
 
-        return packet;
+        packet
     }
     /// START_LAG (pid version, used by GameActor; mirrors C++ SEND_W3GS_START_LAG)
     /// laggers: (pid, milliseconds already lagged -- 0 at the start)
@@ -968,11 +892,8 @@ impl GameProtocol {
 
     /// STOP_LAG (pid version; mirrors C++ SEND_W3GS_STOP_LAG)
     pub fn send_w3gs_stop_lag_pid(pid: u8, lag_ms: u32) -> Vec<u8> {
-        let mut packet = vec![];
-        packet.push(W3GS_HEADER_CONSTANT);
-        packet.push(W3GS_STOP_LAG);
-        packet.push(0);
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_STOP_LAG, 0, 0];
         packet.push(pid);
         packet.extend(lag_ms.to_le_bytes());
         assign_length(&mut packet);
@@ -980,15 +901,8 @@ impl GameProtocol {
     }
 
     pub fn send_w3gs_incoming_action2(actions: &mut VecDeque<IncomingAction>) -> Vec<u8> {
-        let mut packet = vec![];
-        // W3GS header constant
-        packet.push(W3GS_HEADER_CONSTANT);
-        // W3GS_INCOMING_ACTION2
-        packet.push(W3GS_INCOMING_ACTION2);
-        // packet length will be assigned later
-        packet.push(0);
-        // packet length will be assigned later
-        packet.push(0);
+        // the two length bytes are placeholders, filled in by assign_length below
+        let mut packet = vec![W3GS_HEADER_CONSTANT, W3GS_INCOMING_ACTION2, 0, 0];
         // ??? (send interval?)
         packet.push(0);
         // ??? (send interval?)
@@ -999,16 +913,15 @@ impl GameProtocol {
         Self::extend_incoming_action_subpacket(&mut packet, &subpacket);
 
         assign_length(&mut packet);
-        return packet;
+        packet
     }
 
-    fn encode_slot_info(slots: &Vec<GameSlot>, random_seed: u32, layout_style: u8, player_slots: u8) -> Vec<u8> {
-        let mut slot_info: Vec<u8> = vec![];
+    fn encode_slot_info(slots: &[GameSlot], random_seed: u32, layout_style: u8, player_slots: u8) -> Vec<u8> {
         // number of slots
-        slot_info.push(slots.len() as u8);
+        let mut slot_info: Vec<u8> = vec![slots.len() as u8];
 
-        for i in 0..slots.len() {
-            slot_info.extend(slots[i].get_byte_array());
+        for slot in slots {
+            slot_info.extend(slot.get_byte_array());
         }
 
         // random seed
@@ -1017,7 +930,7 @@ impl GameProtocol {
         slot_info.push(layout_style);
         // number of player slots (non observer)
         slot_info.push(player_slots);
-        return slot_info;
+        slot_info
     }
 
     fn incoming_action_subpacket(actions: &mut VecDeque<IncomingAction>) -> Vec<u8> {
@@ -1029,13 +942,13 @@ impl GameProtocol {
             subpacket.extend(&action.action);
         }
 
-        return subpacket;
+        subpacket
     }
 
     fn extend_incoming_action_subpacket(packet: &mut Vec<u8>, subpacket: &Vec<u8>) {
-        if subpacket.len() > 0 {
+        if !subpacket.is_empty() {
             // calculate crc (we only care about the first 2 bytes though)
-            let crc32 = util_calc_crc32(&subpacket);
+            let crc32 = util_calc_crc32(subpacket);
             let crc32 = crc32.to_le_bytes();
             let crc32 = &crc32[0..2];
 

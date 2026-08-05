@@ -73,6 +73,12 @@ pub struct BNetProtocol {
     unique_name: String,            // set in RECEIVE_SID_ENTERCHAT
 }
 
+impl Default for BNetProtocol {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BNetProtocol {
     pub fn new() -> Self {
         Self {
@@ -388,6 +394,8 @@ impl BNetProtocol {
         p
     }
 
+    // mirrors the C++ CBNETProtocol::SEND_SID_STARTADVEX3 signature field for field, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     pub fn send_sid_startadvex3(
         &self,
         state: u8,
@@ -541,6 +549,8 @@ impl BNetProtocol {
         p
     }
 
+    // mirrors the C++ CBNETProtocol::SEND_SID_AUTH_CHECK signature field for field, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     pub fn send_sid_auth_check(
         &self,
         tft: bool,

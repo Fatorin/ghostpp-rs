@@ -106,6 +106,8 @@ impl BNCSUtilInterface {
     /// Additionally: if `war3_path` is set and War3 files are found, use checkRevision to compute exe version/hash/info.
     ///
     /// `_war3_version` is a legacy-interface compatibility parameter; actual file selection is based on the files present on disk.
+    // mirrors the C++ CBNCSUtilInterface::HELP_SID_AUTH_CHECK signature field for field, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     pub fn help_sid_auth_check(
         &mut self,
         war3_path: &str,

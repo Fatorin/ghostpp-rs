@@ -9,23 +9,16 @@ pub const GPS_ACK: u8 = 3;
 pub const GPS_REJECT: u8 = 4;
 
 pub fn send_gpsc_init(version: u32) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    // Fix: originally pushed the header twice by mistake; the second byte should be the packet ID
-    packet.push(GPS_INIT);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_INIT, 0, 0];
     packet.extend(version.to_le_bytes());
     assign_length(&mut packet);
     packet
 }
 
 pub fn send_gpsc_reconnect(pid: u8, reconnect_key: u32, last_packet: u32) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    packet.push(GPS_RECONNECT);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_RECONNECT, 0, 0];
     packet.push(pid);
     packet.extend(reconnect_key.to_le_bytes());
     packet.extend(last_packet.to_le_bytes());
@@ -34,22 +27,16 @@ pub fn send_gpsc_reconnect(pid: u8, reconnect_key: u32, last_packet: u32) -> Vec
 }
 
 pub fn send_gpsc_ack(last_packet: u32) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    packet.push(GPS_ACK);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_ACK, 0, 0];
     packet.extend(last_packet.to_le_bytes());
     assign_length(&mut packet);
     packet
 }
 
 pub fn send_gpss_init(reconnect_port: u16, pid: u8, reconnect_key: u32, num_empty_actions: u8) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    packet.push(GPS_INIT);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_INIT, 0, 0];
     packet.extend(reconnect_port.to_le_bytes());
     packet.push(pid);
     packet.extend(reconnect_key.to_le_bytes());
@@ -59,22 +46,16 @@ pub fn send_gpss_init(reconnect_port: u16, pid: u8, reconnect_key: u32, num_empt
 }
 
 pub fn send_gpss_reconnect(last_packet: u32) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    packet.push(GPS_RECONNECT);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_RECONNECT, 0, 0];
     packet.extend(last_packet.to_le_bytes());
     assign_length(&mut packet);
     packet
 }
 
 pub fn send_gpss_ack(last_packet: u32) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    packet.push(GPS_ACK);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_ACK, 0, 0];
     packet.extend(last_packet.to_le_bytes());
     assign_length(&mut packet);
     packet
@@ -122,11 +103,8 @@ pub fn receive_gps_ack(data: &[u8]) -> Option<u32> {
 }
 
 pub fn send_gpss_reject(reason: u32) -> Vec<u8> {
-    let mut packet = vec![];
-    packet.push(GPS_HEADER_CONSTANT);
-    packet.push(GPS_REJECT);
-    packet.push(0);
-    packet.push(0);
+    // the two length bytes are placeholders, filled in by assign_length below
+    let mut packet = vec![GPS_HEADER_CONSTANT, GPS_REJECT, 0, 0];
     packet.extend(reason.to_le_bytes());
     assign_length(&mut packet);
     packet

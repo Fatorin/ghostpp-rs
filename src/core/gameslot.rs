@@ -38,7 +38,7 @@ pub struct GameSlot {
 }
 
 impl GameSlot {
-    pub fn new_from_array(value: &Vec<u8>) -> Self {
+    pub fn new_from_array(value: &[u8]) -> Self {
         let mut game_slot = GameSlot {
             pid: 0,
             download_status: 0,
@@ -72,6 +72,8 @@ impl GameSlot {
         game_slot
     }
 
+    // mirrors the C++ CGameSlot constructor: one argument per wire field, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pid: u8,
         download_status: u8,

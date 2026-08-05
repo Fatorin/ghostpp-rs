@@ -146,7 +146,7 @@ pub fn util_file_read_full(file_path: &str) -> String {
         Ok(_) => contents,
         Err(_) => {
             warn!("[UTIL] warning - unable to read file");
-            return String::new();
+            String::new()
         }
     }
 }
@@ -178,8 +178,8 @@ pub fn util_byte_array_to_hex_string(vec: &[u8]) -> String {
 pub fn util_calc_crc32(data: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(data);
-    let checksum = hasher.finalize();
-    return checksum;
+    
+    hasher.finalize()
 }
 
 pub fn get_u8_from_config(conig: &Config, key: &str, default_value: u8) -> u8 {
@@ -188,10 +188,10 @@ pub fn get_u8_from_config(conig: &Config, key: &str, default_value: u8) -> u8 {
         return default_value;
     }
 
-    return match u8::try_from(result.unwrap()) {
+    match u8::try_from(result.unwrap()) {
         Ok(value) => value,
-        Err(_) => return default_value,
-    };
+        Err(_) => default_value,
+    }
 }
 
 pub fn get_u16_from_config(conig: &Config, key: &str, default_value: u16) -> u16 {
@@ -200,10 +200,10 @@ pub fn get_u16_from_config(conig: &Config, key: &str, default_value: u16) -> u16
         return default_value;
     }
 
-    return match u16::try_from(result.unwrap()) {
+    match u16::try_from(result.unwrap()) {
         Ok(value) => value,
-        Err(_) => return default_value,
-    };
+        Err(_) => default_value,
+    }
 }
 
 pub fn get_u32_from_config(conig: &Config, key: &str, default_value: u32) -> u32 {
@@ -212,10 +212,10 @@ pub fn get_u32_from_config(conig: &Config, key: &str, default_value: u32) -> u32
         return default_value;
     }
 
-    return match u32::try_from(result.unwrap()) {
+    match u32::try_from(result.unwrap()) {
         Ok(value) => value,
-        Err(_) => return default_value,
-    };
+        Err(_) => default_value,
+    }
 }
 
 pub fn util_encode_stat_string(data: &[u8]) -> Vec<u8> {
@@ -241,7 +241,7 @@ pub fn util_encode_stat_string(data: &[u8]) -> Vec<u8> {
 }
 
 // for protocol
-pub fn assign_length(content: &mut Vec<u8>) -> bool {
+pub fn assign_length(content: &mut [u8]) -> bool {
     if content.len() >= 4 && content.len() <= 65535
     {
         let length_bytes = content.len().to_le_bytes();
@@ -250,7 +250,7 @@ pub fn assign_length(content: &mut Vec<u8>) -> bool {
         return true;
     }
 
-    return false;
+    false
 }
 
 // for protocol
@@ -260,7 +260,7 @@ pub fn validate_length(content: &[u8]) -> bool {
         return false;
     }
 
-    return ((content[3] as usize) << 8 | content[2] as usize) == content.len();
+    ((content[3] as usize) << 8 | content[2] as usize) == content.len()
 }
 
 
@@ -272,10 +272,10 @@ pub fn get_ipv4_address(hostname: &str) -> io::Result<SocketAddrV4> {
                     return Ok(ipv4_addr);
                 }
             }
-            Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), "can't reslvoe ipv4 address."))
+            Err(Error::new(ErrorKind::InvalidData, "can't reslvoe ipv4 address."))
         }
         Err(err) => {
-            Err(Error::new(ErrorKind::from(ErrorKind::InvalidData), format!("DNS resolution error: {}", err)))
+            Err(Error::new(ErrorKind::InvalidData, format!("DNS resolution error: {}", err)))
         }
     }
 }
@@ -324,8 +324,8 @@ mod tests {
     #[test]
     fn test_util_file_read_full() {
         let file_path = "config/blizzard.j";
-        let data = util_file_read_full(&file_path);
-        assert!(data.len() > 0);
+        let data = util_file_read_full(file_path);
+        assert!(!data.is_empty());
     }
 
     #[test]

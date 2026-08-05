@@ -187,6 +187,8 @@ impl GameBase {
     /// GameActor took over: the required config (bind_address, reconnect_wait_time, ...)
     /// is passed in as `GameConfig` construction parameters, and the listener is held centrally by BotCore which routes connections.
     /// For the original logic see C++ game_base.cpp CBaseGame::CBaseGame.
+    // legacy reference skeleton: mirrors the C++ CBaseGame constructor, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         game_host: RefCell<Weak<GameHost>>,
         map: GameMap,
@@ -208,6 +210,8 @@ impl GameBase {
 
     /// Legacy field-initialization content (for porting reference, do not call)
     #[allow(dead_code, unreachable_code, unused_variables)]
+    // legacy reference skeleton: mirrors the C++ CBaseGame constructor, so the argument count is deliberate
+    #[allow(clippy::too_many_arguments)]
     fn legacy_new_reference(
         game_host: RefCell<Weak<GameHost>>,
         map: GameMap,
