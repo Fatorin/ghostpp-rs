@@ -65,6 +65,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("load_your_time", "Your loading time was {seconds} seconds."),
     ("desync_detected", "Warning! Desync detected!"),
     ("reconnect_timeout", "{name} timed out on reconnect and has left the game."),
+    ("player_dropped_stalled", "{name}'s connection stalled and could not keep up; they have been dropped."),
     ("gproxy_disconnected_waiting", "{name} has disconnected, waiting for reconnect (up to {seconds}s)..."),
     ("gproxy_reconnected", "{name} has reconnected!"),
     ("autostart_full", "Player count reached ({count}), auto-starting!"),

@@ -18,7 +18,10 @@ use crate::core::gamemap::{
 };
 use crate::core::GameMap;
 use crate::net::codec::FrameCodec;
-use crate::net::conn::{self, CloseReason, ConnEvent, ConnHandle, ConnId, DEFAULT_RECV_TIMEOUT};
+use crate::net::conn::{
+    self, CloseReason, ConnEvent, ConnHandle, ConnId, DEFAULT_RECV_TIMEOUT,
+    WRITE_QUEUE_MAX_BYTES,
+};
 use crate::util::{get_ticks, util_byte_array_to_u32, util_encode_stat_string};
 
 /// The set of legal characters for the HCL command string (mirrors C++ game_base.cpp)
@@ -35,6 +38,11 @@ pub const SYNC_TOLERANCE_MS: u32 = 5_000;
 /// Lower/upper bounds (ms) for the time window when overridden by !synclimit, to avoid extreme values.
 pub const SYNC_WINDOW_MIN_MS: u32 = 500;
 pub const SYNC_WINDOW_MAX_MS: u32 = 30_000;
+
+/// Cap on the GProxy++ replay buffer held per disconnected player. A reconnect has to push
+/// this whole buffer into the player's write queue in one go, so it must not exceed
+/// [`WRITE_QUEUE_MAX_BYTES`] or a reconnect after a long hold could never complete.
+pub const GPROXY_BUFFER_MAX_BYTES: usize = WRITE_QUEUE_MAX_BYTES;
 
 /// The config needed to create a game (assembled by BotCore from BotConfig + map)
 pub struct GameConfig {
@@ -229,6 +237,9 @@ struct GameActor {
     held_names: Vec<String>,
     /// HCL command string (initially = the map's map_defaulthcl; overridden by !hcl, encoded into slot handicaps at game start)
     hcl_string: String,
+    /// Pids whose write queue overflowed, handled by process_pending_drops after the current
+    /// event so the send path never re-enters itself
+    pending_drop: Vec<u8>,
 }
 
 impl GameActor {
@@ -283,6 +294,7 @@ impl GameActor {
             last_announce: 0,
             held_names: Vec::new(),
             hcl_string,
+            pending_drop: Vec::new(),
         }
     }
 
@@ -353,7 +365,9 @@ impl GameActor {
                         .map(|p| (p.handle.clone(), p.total_received))
                         .collect();
                     for (h, received) in acks {
-                        let _ = h.send(crate::core::gpsprotocol::send_gpss_ack(received)).await;
+                        // try_send, never await: an ack is advisory (it only lets the client trim
+                        // its own resend buffer) and a stalled client must not block the actor
+                        h.try_send(crate::core::gpsprotocol::send_gpss_ack(received));
                     }
                 }
                 _ = download_tick.tick() => {
@@ -391,6 +405,9 @@ impl GameActor {
                     }
                 }
             }
+
+            // Retire any player whose write queue overflowed while handling the event above
+            self.process_pending_drops().await;
 
             // Game-over detection: after starting, all players left → write records and close this game
             if self.started && self.players.is_empty() {
@@ -1170,7 +1187,7 @@ impl GameActor {
                 .values()
                 .filter(|p| {
                     (p.gproxy_disconnected && now_secs.saturating_sub(p.disconnect_time) > wait_secs)
-                        || p.gproxy_buffer_bytes > 8 * 1024 * 1024
+                        || p.gproxy_buffer_bytes > GPROXY_BUFFER_MAX_BYTES
                 })
                 .map(|p| p.pid)
                 .collect();
@@ -1391,14 +1408,12 @@ impl GameActor {
                     None => return,
                 };
                 // GPS packets are sent directly, not counted and not buffered (mirrors C++ using PutBytes rather than Send)
-                let _ = handle
-                    .send(gps::send_gpss_init(
-                        self.cfg.reconnect_port,
-                        pid,
-                        key,
-                        self.cfg.gproxy_empty_actions,
-                    ))
-                    .await;
+                handle.try_send(gps::send_gpss_init(
+                    self.cfg.reconnect_port,
+                    pid,
+                    key,
+                    self.cfg.gproxy_empty_actions,
+                ));
                 info!("[GAME: {}] [{}] is using GProxy++", self.cfg.game_name, name);
                 // Register the key → BotCore (used for routing on reconnect)
                 let _ = self
@@ -1483,7 +1498,7 @@ impl GameActor {
         };
 
         // Handshake response (tells the client how much we received, so it resends its own buffer accordingly)
-        let _ = handle.send(gps::send_gpss_reconnect(total_received)).await;
+        handle.try_send(gps::send_gpss_reconnect(total_received));
 
         // Resend the buffer (kept in the buffer, trimmed later by ACK; mirrors C++ EventGProxyReconnect)
         let pending: Vec<Vec<u8>> = self
@@ -1497,8 +1512,19 @@ impl GameActor {
             name,
             pending.len()
         );
+        // try_send, never await: the replay can be thousands of packets, and awaiting it on a
+        // link that is still bad would block the actor for the whole game. The buffer is only
+        // trimmed by GPS_ACK, so bailing out here loses nothing - the next reconnect replays
+        // from the same point.
         for pkt in pending {
-            let _ = handle.send(pkt).await;
+            if !handle.try_send(pkt) {
+                warn!(
+                    "[GAME: {}] [{}] reconnect replay backed up, waiting for another reconnect",
+                    self.cfg.game_name, name
+                );
+                self.pending_drop.push(pid);
+                break;
+            }
         }
         self.send_all_chat(&crate::lang::t("gproxy_reconnected", &[("name", &name)])).await;
     }
@@ -1520,9 +1546,7 @@ impl GameActor {
 
         // The game has already started
         if self.started {
-            let _ = handle
-                .send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_STARTED as u32))
-                .await;
+            handle.try_send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_STARTED as u32));
             self.conns.remove(&conn_id);
             return;
         }
@@ -1534,9 +1558,7 @@ impl GameActor {
             .any(|p| p.name.eq_ignore_ascii_case(&join.name))
         {
             info!("[GAME: {}] rejecting [{}] - name already taken", self.cfg.game_name, join.name);
-            let _ = handle
-                .send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32))
-                .await;
+            handle.try_send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32));
             self.conns.remove(&conn_id);
             return;
         }
@@ -1550,9 +1572,7 @@ impl GameActor {
                         "[GAME: {}] rejecting [{}] ({peer_ip}) - banned on [{server}] by [{}] ({})",
                         self.cfg.game_name, join.name, ban.admin, ban.reason
                     );
-                    let _ = handle
-                        .send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32))
-                        .await;
+                    handle.try_send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32));
                     self.conns.remove(&conn_id);
                     return;
                 }
@@ -1573,9 +1593,7 @@ impl GameActor {
             Some(s) => s,
             None => {
                 info!("[GAME: {}] rejecting [{}] - game is full", self.cfg.game_name, join.name);
-                let _ = handle
-                    .send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32))
-                    .await;
+                handle.try_send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32));
                 self.conns.remove(&conn_id);
                 return;
             }
@@ -1591,9 +1609,7 @@ impl GameActor {
         let pid = match self.new_pid() {
             Some(p) => p,
             None => {
-                let _ = handle
-                    .send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32))
-                    .await;
+                handle.try_send(GameProtocol::send_w3gs_rejectjoin(REJECTJOIN_FULL as u32));
                 self.conns.remove(&conn_id);
                 return;
             }
@@ -1613,8 +1629,7 @@ impl GameActor {
 
         // ---- send to the joiner ----
         // 1) SLOTINFOJOIN (includes their own PID + the full slot layout)
-        let _ = handle
-            .send(GameProtocol::send_w3gs_slotinfojoin(
+        handle.try_send(GameProtocol::send_w3gs_slotinfojoin(
                 pid,
                 external_port.clone(),
                 external_ip.clone(),
@@ -1622,43 +1637,36 @@ impl GameActor {
                 self.random_seed,
                 self.cfg.map.get_map_layout_style(),
                 self.cfg.map.get_map_nuplayers() as u8,
-            ))
-            .await;
+            ));
 
         // 2) the virtual host's PLAYERINFO (so the lobby shows a host; absent in a full lobby)
         if self.virtual_host_pid != 255 {
-            let _ = handle
-                .send(GameProtocol::send_w3gs_playerinfo(
+            handle.try_send(GameProtocol::send_w3gs_playerinfo(
                     self.virtual_host_pid,
                     self.cfg.virtual_host_name.clone(),
                     vec![0, 0, 0, 0],
                     vec![0, 0, 0, 0],
-                ))
-                .await;
+                ));
         }
 
         // 3) existing players' PLAYERINFO
         for p in self.players.values() {
-            let _ = handle
-                .send(GameProtocol::send_w3gs_playerinfo(
+            handle.try_send(GameProtocol::send_w3gs_playerinfo(
                     p.pid,
                     p.name.clone(),
                     p.external_ip.clone(),
                     p.internal_ip.clone(),
-                ))
-                .await;
+                ));
         }
 
         // 4) MAPCHECK (lets the client compare the map / trigger a download)
-        let _ = handle
-            .send(GameProtocol::send_w3gs_mapcheck(
+        handle.try_send(GameProtocol::send_w3gs_mapcheck(
                 self.cfg.map.get_map_path().to_string(),
                 self.cfg.map.get_map_size().clone(),
                 self.cfg.map.get_map_info().clone(),
                 self.cfg.map.get_map_crc().clone(),
                 self.cfg.map.get_map_sha1().clone(),
-            ))
-            .await;
+            ));
 
         // Create the player record
         self.players.insert(
@@ -2407,7 +2415,69 @@ impl GameActor {
             None => return,
         };
         if let Some(h) = handle {
-            let _ = h.send(data).await;
+            // Never await the send here. A client whose TCP has stalled stops draining its
+            // write queue, and an awaiting send would block this actor - and with it every
+            // other player's action batches - for as long as the kernel keeps retransmitting,
+            // which is minutes. The whole game then freezes, clients stop returning keepalives
+            // (W3 only sends one per received action batch) and everyone trips the 30s receive
+            // timeout at once. Falling WRITE_QUEUE_DEPTH packets behind is that one player's
+            // problem: note them and keep the game running for everybody else.
+            if !h.try_send(data) && !self.pending_drop.contains(&pid) {
+                self.pending_drop.push(pid);
+            }
+        }
+    }
+
+    /// Deal with players whose write queue overflowed in [`Self::send_to_pid`].
+    ///
+    /// Runs from the main loop rather than from inside the send path, so it is free to
+    /// broadcast and to call [`Self::remove_player`] without re-entering `send_to_pid`.
+    async fn process_pending_drops(&mut self) {
+        if self.pending_drop.is_empty() {
+            return;
+        }
+        let game_loaded = self.game_loaded;
+        let reconnect = self.cfg.reconnect_enabled;
+        for pid in std::mem::take(&mut self.pending_drop) {
+            let held = match self.players.get_mut(&pid) {
+                // already waiting for a reconnect - the stall is known, nothing to do
+                Some(p) if p.gproxy_disconnected => continue,
+                Some(p) => {
+                    let hold = p.gproxy && game_loaded && reconnect;
+                    if hold {
+                        p.gproxy_disconnected = true;
+                        p.disconnect_time = crate::util::get_time();
+                    }
+                    Some((p.name.clone(), p.conn_id, hold))
+                }
+                None => None,
+            };
+            let (name, conn_id, hold) = match held {
+                Some(v) => v,
+                None => continue,
+            };
+            warn!(
+                "[GAME: {}] [{}] write queue full ({} MB unsent) - connection stalled, dropping them rather than blocking the game",
+                self.cfg.game_name, name, WRITE_QUEUE_MAX_BYTES / (1024 * 1024)
+            );
+            if hold {
+                // Every packet since the game loaded is still in gproxy_buffer, so abandoning
+                // the stalled socket costs nothing: the reconnect replays the full stream.
+                self.conns.remove(&conn_id);
+                self.conn_pid.remove(&conn_id);
+                let wait = (self.cfg.gproxy_empty_actions as u32 + 1) * 60;
+                self.send_all_chat(&crate::lang::t(
+                    "gproxy_disconnected_waiting",
+                    &[("name", &name), ("seconds", &wait.to_string())],
+                ))
+                .await;
+            } else {
+                // Without GProxy there is no buffer to replay from, and the action stream
+                // cannot skip a packet without desyncing the client, so they have to go.
+                self.send_all_chat(&crate::lang::t("player_dropped_stalled", &[("name", &name)]))
+                    .await;
+                self.remove_player(pid, PLAYERLEAVE_DISCONNECT as u32).await;
+            }
         }
     }
 
