@@ -9,7 +9,9 @@
 //!   and is never blocked by a slow client.
 //!
 //! The owner holds a [`ConnHandle`]; dropping every handle ⇒ the write channel closes ⇒ the write
-//! task ends ⇒ the socket write side closes. The read task emits [`ConnEvent::Closed`] on EOF / timeout / deframing error.
+//! task ends ⇒ the socket write side closes. Note the write task first pushes whatever is still
+//! queued, which on a stalled socket can take as long as the kernel retransmits; call
+//! [`ConnHandle::close`] to tear it down immediately instead. The read task emits [`ConnEvent::Closed`] on EOF / timeout / deframing error.
 //! This design converts C++'s `player → game` back-pointer calls entirely into a one-way event stream.
 
 use std::net::SocketAddr;
@@ -75,6 +77,8 @@ pub struct ConnHandle {
     write_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// Bytes handed over but not yet written to the socket
     queued: Arc<AtomicUsize>,
+    /// Lets close() stop the write task without waiting for it to drain
+    write_task: Arc<tokio::task::AbortHandle>,
 }
 
 impl ConnHandle {
@@ -103,6 +107,20 @@ impl ConnHandle {
         self.queued.load(Ordering::Relaxed)
     }
 
+    /// Tear the connection down now, discarding anything still queued.
+    ///
+    /// Merely dropping every handle also ends the write task, but only after it has pushed the
+    /// whole backlog through - on a stalled socket that is however long the kernel keeps
+    /// retransmitting. Use this when the owner has decided the peer is gone and wants the
+    /// socket closed promptly, so the peer's TCP sees it and can act (a GProxy++ client
+    /// reconnects on close rather than waiting out its own idle timer).
+    ///
+    /// Aborting mid-write can leave a partial packet on the wire; that is fine for a
+    /// connection being abandoned, since anything the peer still needs is replayed in full
+    /// over the new connection.
+    pub fn close(&self) {
+        self.write_task.abort();
+    }
 }
 
 /// Start the read/write tasks for an already-accepted TCP connection.
@@ -131,7 +149,7 @@ pub fn spawn(
 
     // ---- write task ----
     let write_queued = Arc::clone(&queued);
-    tokio::spawn(async move {
+    let write_task = tokio::spawn(async move {
         while let Some(data) = write_rx.recv().await {
             let len = data.len();
             let result = write_half.write_all(&data).await;
@@ -142,6 +160,13 @@ pub fn spawn(
                 debug!(conn = id, "write error: {e}");
                 break;
             }
+        }
+
+        // A write error abandons whatever is still queued, so give the budget those bytes
+        // back rather than leaving them charged against a handle that will never send again
+        write_rx.close();
+        while let Ok(data) = write_rx.try_recv() {
+            write_queued.fetch_sub(data.len(), Ordering::Relaxed);
         }
 
         // Channel closed (all ConnHandles dropped) or a write error: close the write side
@@ -176,5 +201,11 @@ pub fn spawn(
         let _ = event_tx.send(ConnEvent::Closed(id, reason)).await;
     });
 
-    ConnHandle { id, peer, write_tx, queued }
+    ConnHandle {
+        id,
+        peer,
+        write_tx,
+        queued,
+        write_task: Arc::new(write_task.abort_handle()),
+    }
 }

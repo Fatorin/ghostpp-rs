@@ -39,10 +39,15 @@ pub const SYNC_TOLERANCE_MS: u32 = 5_000;
 pub const SYNC_WINDOW_MIN_MS: u32 = 500;
 pub const SYNC_WINDOW_MAX_MS: u32 = 30_000;
 
-/// Cap on the GProxy++ replay buffer held per disconnected player. A reconnect has to push
-/// this whole buffer into the player's write queue in one go, so it must not exceed
-/// [`WRITE_QUEUE_MAX_BYTES`] or a reconnect after a long hold could never complete.
-pub const GPROXY_BUFFER_MAX_BYTES: usize = WRITE_QUEUE_MAX_BYTES;
+/// Cap on the GProxy++ replay buffer held per disconnected player.
+///
+/// A reconnect pushes this whole buffer into the player's write queue in one go, preceded by
+/// the GPSS_RECONNECT handshake, so it must be *strictly* smaller than
+/// [`WRITE_QUEUE_MAX_BYTES`] - equal would let a buffer sitting exactly at the cap push the
+/// tail of its own replay over the budget and re-strand the player. The headroom also absorbs
+/// the buffer briefly exceeding the cap between game beats, since the kick that enforces it
+/// only runs once per beat.
+pub const GPROXY_BUFFER_MAX_BYTES: usize = WRITE_QUEUE_MAX_BYTES - 64 * 1024;
 
 /// The config needed to create a game (assembled by BotCore from BotConfig + map)
 pub struct GameConfig {
@@ -1516,6 +1521,7 @@ impl GameActor {
         // link that is still bad would block the actor for the whole game. The buffer is only
         // trimmed by GPS_ACK, so bailing out here loses nothing - the next reconnect replays
         // from the same point.
+        let mut replayed = true;
         for pkt in pending {
             if !handle.try_send(pkt) {
                 warn!(
@@ -1523,10 +1529,16 @@ impl GameActor {
                     self.cfg.game_name, name
                 );
                 self.pending_drop.push(pid);
+                replayed = false;
                 break;
             }
         }
-        self.send_all_chat(&crate::lang::t("gproxy_reconnected", &[("name", &name)])).await;
+        // Only announce the reconnect if the backlog actually got through - otherwise
+        // process_pending_drops is about to announce the disconnect again, and claiming
+        // "reconnected" first would just be noise
+        if replayed {
+            self.send_all_chat(&crate::lang::t("gproxy_reconnected", &[("name", &name)])).await;
+        }
     }
 
     /// REQJOIN join flow (mirrors C++ CBaseGame::EventPlayerJoined)
@@ -2420,8 +2432,8 @@ impl GameActor {
             // other player's action batches - for as long as the kernel keeps retransmitting,
             // which is minutes. The whole game then freezes, clients stop returning keepalives
             // (W3 only sends one per received action batch) and everyone trips the 30s receive
-            // timeout at once. Falling WRITE_QUEUE_DEPTH packets behind is that one player's
-            // problem: note them and keep the game running for everybody else.
+            // timeout at once. Falling a whole WRITE_QUEUE_MAX_BYTES behind is that one
+            // player's problem: note them and keep the game running for everybody else.
             if !h.try_send(data) && !self.pending_drop.contains(&pid) {
                 self.pending_drop.push(pid);
             }
@@ -2448,22 +2460,27 @@ impl GameActor {
                         p.gproxy_disconnected = true;
                         p.disconnect_time = crate::util::get_time();
                     }
-                    Some((p.name.clone(), p.conn_id, hold))
+                    Some((p.name.clone(), p.conn_id, hold, p.handle.queued_bytes()))
                 }
                 None => None,
             };
-            let (name, conn_id, hold) = match held {
+            let (name, conn_id, hold, unsent) = match held {
                 Some(v) => v,
                 None => continue,
             };
             warn!(
-                "[GAME: {}] [{}] write queue full ({} MB unsent) - connection stalled, dropping them rather than blocking the game",
-                self.cfg.game_name, name, WRITE_QUEUE_MAX_BYTES / (1024 * 1024)
+                "[GAME: {}] [{}] write queue full ({} KB unsent) - connection stalled, dropping them rather than blocking the game",
+                self.cfg.game_name, name, unsent / 1024
             );
+            // Close rather than just forget it: the write task would otherwise keep pushing the
+            // backlog into a dead socket for as long as the kernel retransmits, and the client
+            // would wait out its own idle timer instead of seeing the close and reconnecting.
+            if let Some(h) = self.conns.remove(&conn_id) {
+                h.close();
+            }
             if hold {
                 // Every packet since the game loaded is still in gproxy_buffer, so abandoning
                 // the stalled socket costs nothing: the reconnect replays the full stream.
-                self.conns.remove(&conn_id);
                 self.conn_pid.remove(&conn_id);
                 let wait = (self.cfg.gproxy_empty_actions as u32 + 1) * 60;
                 self.send_all_chat(&crate::lang::t(
