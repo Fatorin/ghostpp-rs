@@ -2895,6 +2895,101 @@ mod tests {
         );
     }
 
+    /// A seated player wired to `handle`, with everything else at its post-join defaults
+    fn seated_player(pid: u8, name: &str, handle: ConnHandle, gproxy: bool) -> LobbyPlayer {
+        LobbyPlayer {
+            pid,
+            name: name.to_string(),
+            conn_id: 0,
+            handle,
+            internal_ip: vec![0, 0, 0, 0],
+            external_ip: vec![0, 0, 0, 0],
+            download_started: false,
+            download_finished: true,
+            last_part_sent: 0,
+            last_part_acked: 0,
+            finished_loading: true,
+            finished_loading_ticks: 0,
+            sync_counter: 0,
+            checksums: Default::default(),
+            lagging: false,
+            started_lagging_ticks: 0,
+            gproxy,
+            gproxy_disconnected: false,
+            gproxy_key: 0,
+            gproxy_buffer: Default::default(),
+            gproxy_buffer_bytes: 0,
+            total_sent: 0,
+            total_received: 1,
+            disconnect_time: 0,
+            spoofed: false,
+            spoofed_realm: String::new(),
+            muted: false,
+            pings: Default::default(),
+        }
+    }
+
+    /// Drive one player's write queue past its byte budget and return the actor afterwards.
+    async fn stall_one_player(gproxy: bool) -> GameActor {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let mut actor = GameActor::new(make_cfg(Arc::new(GameMap::new())), event_tx, cmd_rx);
+        actor.cfg.reconnect_enabled = gproxy;
+        actor.game_loaded = gproxy;
+
+        let (handle, _undrained) = ConnHandle::new_undrained_for_test();
+        actor.players.insert(3, seated_player(3, "stalled", handle, gproxy));
+        actor.slots[0].pid = 3;
+        actor.slots[0].slot_status = SLOTSTATUS_OCCUPIED;
+        // the receiver is deliberately leaked: dropping it would close the channel and make
+        // try_send fail for the wrong reason
+        std::mem::forget(_undrained);
+
+        let packet = vec![0u8; 64 * 1024];
+        for _ in 0..(WRITE_QUEUE_MAX_BYTES / packet.len()) + 2 {
+            actor.send_to_pid(3, packet.clone()).await;
+        }
+        assert_eq!(
+            actor.pending_drop,
+            vec![3],
+            "a player whose write queue overflowed must be flagged, not awaited"
+        );
+        actor.process_pending_drops().await;
+        actor
+    }
+
+    /// Without GProxy++ there is nothing to replay from, so a stalled player is removed - but
+    /// the game itself carries on. Before the fix the actor awaited the full queue instead and
+    /// froze every other player in the game with it.
+    #[tokio::test]
+    async fn stalled_player_without_gproxy_is_removed() {
+        let actor = stall_one_player(false).await;
+        assert!(
+            !actor.players.contains_key(&3),
+            "a stalled non-GProxy player should be removed"
+        );
+        assert_eq!(
+            actor.slots[0].slot_status, SLOTSTATUS_OPEN,
+            "their slot should be freed"
+        );
+    }
+
+    /// With GProxy++ the packets are all still in gproxy_buffer, so the player is kept and
+    /// held for a reconnect that replays them rather than being dropped outright.
+    #[tokio::test]
+    async fn stalled_player_with_gproxy_is_held_for_reconnect() {
+        let actor = stall_one_player(true).await;
+        let player = actor.players.get(&3).expect("GProxy player must be kept");
+        assert!(player.gproxy_disconnected, "should be waiting for a reconnect");
+        assert!(
+            player.gproxy_buffer_bytes > 0,
+            "the backlog must be retained for the reconnect replay"
+        );
+        // disconnect_time is deliberately not asserted: get_time() counts seconds since
+        // startup, so inside a test that finishes in milliseconds a correctly stamped timer
+        // is indistinguishable from the 0 it was initialised to
+    }
+
     fn assign_len(mut p: Vec<u8>) -> Vec<u8> {
         let len = p.len() as u16;
         p[2..4].copy_from_slice(&len.to_le_bytes());

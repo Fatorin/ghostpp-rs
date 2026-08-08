@@ -209,3 +209,76 @@ pub fn spawn(
         write_task: Arc::new(write_task.abort_handle()),
     }
 }
+
+impl ConnHandle {
+    /// A handle backed by a plain channel instead of a socket, so a test can hold the receiver
+    /// and decline to drain it. That reproduces a stalled peer exactly, without the kernel's
+    /// loopback buffering - which happily absorbs tens of megabytes and would stop the byte
+    /// budget from ever being reached.
+    #[cfg(test)]
+    pub fn new_undrained_for_test() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (write_tx, write_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let idle = tokio::spawn(std::future::ready(()));
+        (
+            Self {
+                id: 0,
+                peer: SocketAddr::from(([127, 0, 0, 1], 0)),
+                write_tx,
+                queued: Arc::new(AtomicUsize::new(0)),
+                write_task: Arc::new(idle.abort_handle()),
+            },
+            write_rx,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer that stops draining must be refused once WRITE_QUEUE_MAX_BYTES is outstanding,
+    /// and must be refused without ever blocking the caller. This is the backstop the whole
+    /// stalled-client fix rests on: `try_send` returning false is what tells GameActor to drop
+    /// that player instead of parking the entire game on them.
+    #[tokio::test]
+    async fn try_send_refuses_once_the_byte_budget_is_exhausted() {
+        let (handle, mut rx) = ConnHandle::new_undrained_for_test();
+        let packet = vec![0u8; 64 * 1024];
+
+        let mut accepted = 0usize;
+        // Bound the loop well past the budget so a regression shows up as a failed assert
+        // rather than an infinite loop
+        for _ in 0..(WRITE_QUEUE_MAX_BYTES / packet.len()) * 4 {
+            if !handle.try_send(packet.clone()) {
+                break;
+            }
+            accepted += packet.len();
+        }
+
+        assert_eq!(
+            accepted, WRITE_QUEUE_MAX_BYTES,
+            "should accept exactly the budget before refusing"
+        );
+        assert_eq!(handle.queued_bytes(), WRITE_QUEUE_MAX_BYTES);
+        assert!(!handle.try_send(vec![0u8; 1]), "still refused while nothing drains");
+
+        // Draining frees the budget again: the accounting tracks what is outstanding, not a
+        // high-water mark
+        let taken = rx.recv().await.expect("queued packet");
+        assert_eq!(taken.len(), packet.len());
+    }
+
+    /// A closed connection refuses sends rather than growing the queue forever.
+    #[tokio::test]
+    async fn try_send_refuses_after_the_receiver_is_gone() {
+        let (handle, rx) = ConnHandle::new_undrained_for_test();
+        assert!(handle.try_send(vec![1, 2, 3]));
+        drop(rx);
+        assert!(!handle.try_send(vec![4, 5, 6]), "closed channel must refuse");
+        assert_eq!(
+            handle.queued_bytes(),
+            3,
+            "a refused send must not be charged against the budget"
+        );
+    }
+}
