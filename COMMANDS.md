@@ -118,6 +118,7 @@ Handled by GameActor (`handle_admin_command`):
 | `!closeall` | admin | Close all currently open slots. |
 | `!sp` | admin | Shuffle players (randomly reassign occupied human players across occupied slots). |
 | `!hold <name> [name...]` | admin | Reserve names: add names (lowercased) to the hold list; consumed once on join. |
+| `!download <name>`, `!dl <name>` | admin | Approve one player's map download when `bot_allowdownloads` is `2` (conditional). Partial name match; sends STARTDOWNLOAD and begins feeding map parts. Rejected once the game has started. |
 | `!mute <name>` | admin | Mute a player (their messages are not relayed). Partial name match. |
 | `!unmute <name>` | admin | Unmute. |
 | `!muteall` | admin | Mute all: in game only blocks "all"-scope public messages (flag 32, mode 0); team / private still pass. |

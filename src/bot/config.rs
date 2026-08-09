@@ -149,7 +149,10 @@ impl BotConfig {
             reserve_admins: config.get_bool("bot_reserveadmins").unwrap_or(true),
             refresh_messages: config.get_bool("bot_refreshmessages").unwrap_or(false),
             auto_lock: config.get_bool("bot_autolock").unwrap_or(false),
-            allow_downloads: get_u8_from_config(config, "bot_allowdownloads", 0),
+            // Default 1 to match the C++ default.cfg. It used to be 0 here, which was harmless
+            // only because the value was ignored; now that it is wired through, a config
+            // missing the key would otherwise start kicking everyone who lacks the map.
+            allow_downloads: get_u8_from_config(config, "bot_allowdownloads", 1),
             ping_during_downloads: config.get_bool("bot_pingduringdownloads").unwrap_or(false),
             max_downloaders: get_u8_from_config(config, "bot_maxdownloaders", 3),
             max_download_speed: get_u32_from_config(config, "bot_maxdownloadspeed", 100),

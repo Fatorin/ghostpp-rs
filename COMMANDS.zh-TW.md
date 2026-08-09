@@ -113,6 +113,7 @@
 | `!closeall` | admin | 關閉所有目前為開放的 slot。 |
 | `!sp` | admin | 洗牌(將佔用中的真人玩家在各佔用 slot 間隨機重排)。 |
 | `!hold <name> [name...]` | admin | 保留名額:將名字(小寫)加入保留名單,加入時消耗一次。 |
+| `!download <name>`、`!dl <name>` | admin | 當 `bot_allowdownloads` 為 `2`(條件式)時,核准單一玩家下載地圖。支援名稱部分比對;會送出 STARTDOWNLOAD 並開始傳送地圖分段。遊戲開始後拒絕。 |
 | `!mute <name>` | admin | 靜音玩家(其訊息不轉發)。名稱部分比對。 |
 | `!unmute <name>` | admin | 解除靜音。 |
 | `!muteall` | admin | 全場靜音:遊戲中僅擋「全體」公開訊息(flag 32 且 mode 0);隊伍 / 私訊仍放行。 |

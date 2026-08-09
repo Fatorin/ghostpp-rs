@@ -121,6 +121,10 @@ struct LobbyPlayer {
     external_ip: Vec<u8>,
 
     // ---- map download (mirrors the C++ CGamePlayer download fields) ----
+    /// An admin green-lit this player's download with !download. Only consulted when
+    /// bot_allowdownloads is 2; mirrors C++ CGamePlayer::m_DownloadAllowed, which likewise
+    /// starts false and is only ever set by that command.
+    download_allowed: bool,
     download_started: bool,
     download_finished: bool,
     /// The map offset already sent (the next part starts here)
@@ -666,6 +670,76 @@ impl GameActor {
             "sp" => {
                 self.shuffle_players().await;
                 self.send_all_chat(&crate::lang::t("players_shuffled", &[])).await;
+            }
+            // Green-light one player's map download under bot_allowdownloads = 2
+            // (mirrors C++ game.cpp:907-932). Without this the conditional mode would just
+            // block every download forever.
+            "download" | "dl" => {
+                if self.started {
+                    self.reply_to(req_pid, &crate::lang::t("download_game_started", &[])).await;
+                    return true;
+                }
+                let target = arg.to_lowercase();
+                if target.is_empty() {
+                    self.reply_to(req_pid, &crate::lang::t("download_usage", &[])).await;
+                    return true;
+                }
+                let matches: Vec<u8> = self
+                    .players
+                    .values()
+                    .filter(|p| p.name.to_lowercase().contains(&target))
+                    .map(|p| p.pid)
+                    .collect();
+                match matches.as_slice() {
+                    [] => {
+                        self.reply_to(
+                            req_pid,
+                            &crate::lang::t("download_no_match", &[("name", arg)]),
+                        )
+                        .await
+                    }
+                    [target_pid] => {
+                        let target_pid = *target_pid;
+                        let name = match self.players.get_mut(&target_pid) {
+                            Some(p) if p.download_finished => {
+                                let name = p.name.clone();
+                                self.reply_to(
+                                    req_pid,
+                                    &crate::lang::t("download_already_has_map", &[("name", &name)]),
+                                )
+                                .await;
+                                return true;
+                            }
+                            Some(p) => {
+                                p.download_allowed = true;
+                                p.download_started = true;
+                                p.last_part_sent = 0;
+                                p.last_part_acked = 0;
+                                p.name.clone()
+                            }
+                            None => return true,
+                        };
+                        info!(
+                            "[GAME: {}] [{}] map download approved by [{requester}]",
+                            self.cfg.game_name, name
+                        );
+                        let pkt = GameProtocol::send_w3gs_startdownload(self.host_pid());
+                        self.send_to_pid(target_pid, pkt).await;
+                        self.send_map_parts(target_pid).await;
+                        self.send_all_chat(&crate::lang::t(
+                            "download_approved",
+                            &[("name", &name)],
+                        ))
+                        .await;
+                    }
+                    _ => {
+                        self.reply_to(
+                            req_pid,
+                            &crate::lang::t("download_many_matches", &[("name", arg)]),
+                        )
+                        .await
+                    }
+                }
             }
             "hold" => {
                 // !hold <name> ...: reserve a slot (record the list, prioritizing that name on join; simplified here to an immediate acknowledgement)
@@ -1724,6 +1798,7 @@ impl GameActor {
                 handle,
                 internal_ip: join.internal_ip.clone(),
                 external_ip: external_ip.clone(),
+                download_allowed: false,
                 download_started: false,
                 download_finished: false,
                 last_part_sent: 0,
@@ -1832,7 +1907,17 @@ impl GameActor {
                 return;
             }
 
-            let start_download = {
+            // bot_allowdownloads = 2: nothing is sent until an admin green-lights this player
+            // with !download (mirrors C++ game_base.cpp:3236). The player simply waits in the
+            // lobby - an admin either approves them or kicks them.
+            let permitted = self.cfg.download_mode != 2
+                || self
+                    .players
+                    .get(&pid)
+                    .map(|p| p.download_allowed)
+                    .unwrap_or(false);
+
+            let start_download = permitted && {
                 let p = match self.players.get_mut(&pid) {
                     Some(p) => p,
                     None => return,
@@ -1856,7 +1941,9 @@ impl GameActor {
                 let pkt = GameProtocol::send_w3gs_startdownload(self.host_pid());
                 self.send_to_pid(pid, pkt).await;
             }
-            self.send_map_parts(pid).await;
+            if permitted {
+                self.send_map_parts(pid).await;
+            }
         } else {
             // The player already has the complete map
             let finished_now = {
@@ -2938,6 +3025,7 @@ mod tests {
             handle,
             internal_ip: vec![0, 0, 0, 0],
             external_ip: vec![0, 0, 0, 0],
+            download_allowed: false,
             download_started: false,
             download_finished: true,
             last_part_sent: 0,
@@ -2961,6 +3049,50 @@ mod tests {
             muted: false,
             pings: Default::default(),
         }
+    }
+
+    /// bot_allowdownloads = 2 must hold the map back until an admin runs !download.
+    ///
+    /// Regression test: the config value was parsed into BotConfig and then dropped on the
+    /// floor - BotCore hardcoded download_mode to 1 - and the actor only ever special-cased
+    /// mode 0, so conditional mode behaved exactly like "always allow" and every player
+    /// pulled the whole map.
+    #[tokio::test]
+    async fn conditional_downloads_wait_for_admin_approval() {
+        let mut cfg = make_cfg(Arc::new(GameMap::new()));
+        cfg.download_mode = 2;
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(256);
+        let mut actor = GameActor::new(cfg, event_tx, cmd_rx);
+        actor.map_size = 4096;
+        actor.map_data = Some(Arc::new(vec![7u8; 4096]));
+
+        let (handle, mut sent) = ConnHandle::new_undrained_for_test();
+        actor.players.insert(1, seated_player(1, "nomap", handle, false));
+        actor.players.get_mut(&1).unwrap().download_finished = false;
+        actor.slots[0].pid = 1;
+        actor.slots[0].slot_status = SLOTSTATUS_OCCUPIED;
+
+        // The client reports it has no map. Without approval nothing at all goes out.
+        actor.handle_map_size(1, 1, 0).await;
+        assert!(
+            !actor.players[&1].download_started,
+            "conditional mode must not start a download on its own"
+        );
+        assert!(
+            sent.try_recv().is_err(),
+            "not one byte of map data should be sent before an admin approves"
+        );
+
+        // An admin green-lights them by partial name
+        actor.handle_admin_command("admin", "download", "nom").await;
+        assert!(actor.players[&1].download_allowed, "approval should be recorded");
+        assert!(actor.players[&1].download_started, "the download should now be running");
+
+        let first = sent.try_recv().expect("STARTDOWNLOAD should be queued");
+        assert_eq!(first[1], W3GS_STARTDOWNLOAD, "expected STARTDOWNLOAD first");
+        let second = sent.try_recv().expect("map parts should follow");
+        assert_eq!(second[1], W3GS_MAPPART, "expected map data after approval");
     }
 
     /// An actor with `count` seated players, all finished loading, ready to be started.

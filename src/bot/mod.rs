@@ -92,6 +92,9 @@ impl BotCore {
         let autohost_enabled = !cfg.auto_host_game_name.is_empty()
             && cfg.auto_host_maximum_games > 0
             && cfg.auto_host_auto_start_players > 0;
+        // bot_allowdownloads; !downloads overrides it at runtime. This used to be hardcoded to
+        // 1, so the config key was parsed and then ignored and every game allowed downloads
+        let download_mode = cfg.allow_downloads;
 
         let core = Self {
             cfg,
@@ -109,7 +112,7 @@ impl BotCore {
             autohost_counter: 0,
             gproxy_keys: HashMap::new(),
             games_disabled: false,
-            download_mode: 1,
+            download_mode,
         };
 
         (core, event_tx)
