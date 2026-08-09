@@ -1059,7 +1059,11 @@ impl GameActor {
                         self.cfg.game_name, name
                     );
                 }
-                self.check_desync().await;
+                // Mirrors C++ EventPlayerKeepAlive (game_base.cpp:2783): the checksum is queued
+                // unconditionally, but comparing only starts once the game is loaded
+                if self.game_loaded {
+                    self.check_desync().await;
+                }
             }
             W3GS_LEAVEGAME => {
                 let reason = GameProtocol::receive_w3gs_leavegame(data);
@@ -1098,6 +1102,17 @@ impl GameActor {
             self.game_loading = false;
             self.game_loaded = true;
             self.loaded_time = crate::util::get_time();
+
+            // Desync detection compares position N of every player's checksum queue as if it
+            // were the same turn, so the queues have to start level. Anything queued before
+            // this point was sent while players were still loading and at their own pace, and
+            // one player arriving with a spare checksum offsets that player against everyone
+            // else for the rest of the game - which reported a desync on the very first
+            // comparison of a game that then went on to play out perfectly normally.
+            // (C++ only guards the comparison, game_base.cpp:2783, and carries the same skew.)
+            for p in self.players.values_mut() {
+                p.checksums.clear();
+            }
             info!(
                 "[GAME: {}] all players loaded, game started (latency={}ms, lag tolerance={}ms={} batches)",
                 self.cfg.game_name,
@@ -1156,21 +1171,40 @@ impl GameActor {
         while !self.players.is_empty()
             && self.players.values().all(|p| !p.checksums.is_empty())
         {
-            let mut first: Option<u32> = None;
-            let mut mismatch = false;
+            // Pop one checksum from every player: they are queued in turn order, so position N
+            // of each queue is that player's view of the same turn - which only holds because
+            // the queues are cleared the moment the game loads (see check_loading_complete)
+            let mut round: Vec<(u32, String)> = Vec::with_capacity(self.players.len());
             for p in self.players.values_mut() {
-                let c = p.checksums.pop_front().unwrap();
-                match first {
-                    None => first = Some(c),
-                    Some(f) if f != c => mismatch = true,
-                    _ => {}
-                }
+                round.push((p.checksums.pop_front().unwrap(), p.name.clone()));
             }
-            if mismatch && !self.desync_warned {
-                self.desync_warned = true;
-                warn!("[GAME: {}] desync detected! player game states have diverged", self.cfg.game_name);
-                self.send_all_chat(&crate::lang::t("desync_detected", &[])).await;
+            let first = round[0].0;
+            if round.iter().all(|(c, _)| *c == first) || self.desync_warned {
+                continue;
             }
+            self.desync_warned = true;
+
+            // Group the players by the game state they reported, mirroring the C++ bins
+            // (game_base.cpp:2830-2870). A lone outlier against a large agreeing group is a real
+            // desync; everyone reporting something different means the comparison itself is
+            // misaligned, and this line is what tells the two apart in a bug report.
+            let mut bins: std::collections::HashMap<u32, Vec<String>> = Default::default();
+            for (checksum, name) in round {
+                bins.entry(checksum).or_default().push(name);
+            }
+            let mut groups: Vec<(u32, Vec<String>)> = bins.into_iter().collect();
+            groups.sort_by_key(|(_, names)| std::cmp::Reverse(names.len()));
+            let summary = groups
+                .iter()
+                .map(|(checksum, names)| format!("{checksum:08X}: {}", names.join(", ")))
+                .collect::<Vec<_>>()
+                .join(" | ");
+
+            warn!(
+                "[GAME: {}] desync detected! player game states have diverged - {summary}",
+                self.cfg.game_name
+            );
+            self.send_all_chat(&crate::lang::t("desync_detected", &[])).await;
         }
     }
 
@@ -2927,6 +2961,71 @@ mod tests {
             muted: false,
             pings: Default::default(),
         }
+    }
+
+    /// An actor with `count` seated players, all finished loading, ready to be started.
+    fn actor_with_players(count: u8) -> GameActor {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(256);
+        let mut actor = GameActor::new(make_cfg(Arc::new(GameMap::new())), event_tx, cmd_rx);
+        for pid in 1..=count {
+            let (handle, undrained) = ConnHandle::new_undrained_for_test();
+            std::mem::forget(undrained);
+            actor
+                .players
+                .insert(pid, seated_player(pid, &format!("p{pid}"), handle, false));
+        }
+        actor.game_loading = true;
+        actor
+    }
+
+    /// Checksums that arrive while players are still loading must not offset one player against
+    /// the others once the game starts.
+    ///
+    /// Regression test: the queues were never levelled at game start, so a single stray
+    /// pre-load checksum shifted that player by one turn permanently and every later comparison
+    /// pitted turn N against turn N-1. Every multiplayer game reported "desync detected" one
+    /// second after loading and then played out perfectly normally for the next 47 minutes.
+    #[tokio::test]
+    async fn checksums_queued_while_loading_do_not_fake_a_desync() {
+        let mut actor = actor_with_players(3);
+
+        // one player's client gets a keepalive in before the others finish loading
+        actor.players.get_mut(&1).unwrap().checksums.push_back(0xDEAD_BEEF);
+
+        actor.check_loading_complete().await;
+        assert!(actor.game_loaded, "all players had finished loading");
+        assert!(
+            actor.players.values().all(|p| p.checksums.is_empty()),
+            "the queues must be levelled at game start"
+        );
+
+        // three turns in perfect agreement
+        for turn in 0..3u32 {
+            for p in actor.players.values_mut() {
+                p.checksums.push_back(0x1000 + turn);
+            }
+            actor.check_desync().await;
+        }
+        assert!(
+            !actor.desync_warned,
+            "players agreeing on every turn must not be reported as desynced"
+        );
+    }
+
+    /// A genuine divergence is still caught.
+    #[tokio::test]
+    async fn genuine_desync_is_still_detected() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        for p in actor.players.values_mut() {
+            p.checksums.push_back(0x1234);
+        }
+        actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999;
+        actor.check_desync().await;
+
+        assert!(actor.desync_warned, "a diverging player must be reported");
     }
 
     /// Drive one player's write queue past its byte budget and return the actor afterwards.
