@@ -775,7 +775,7 @@ impl BotCore {
                             self.try_autohost().await;
                         }
                     }
-                    _ => {
+                    "" => {
                         let state = if self.autohost_enabled {
                             crate::lang::t("state_on", &[])
                         } else {
@@ -791,6 +791,43 @@ impl BotCore {
                             ],
                         );
                         self.reply_creator(&who, &msg).await;
+                    }
+                    // !autohost <maxgames> <startplayers> [gamename] (GHost convention; gamename optional here)
+                    rest => {
+                        let mut parts = rest.splitn(3, char::is_whitespace);
+                        let max_games = parts.next().and_then(|s| s.parse::<u32>().ok());
+                        let start_players = parts.next().and_then(|s| s.parse::<u8>().ok());
+                        let game_name = parts.next().map(str::trim).unwrap_or("");
+                        match (max_games, start_players) {
+                            (Some(m), Some(p))
+                                if m >= 1
+                                    && (1..=12).contains(&p)
+                                    && game_name.len() <= 31
+                                    && (!game_name.is_empty()
+                                        || !self.cfg.auto_host_game_name.is_empty()) =>
+                            {
+                                self.cfg.auto_host_maximum_games = m;
+                                self.cfg.auto_host_auto_start_players = p;
+                                if !game_name.is_empty() {
+                                    self.cfg.auto_host_game_name = game_name.to_string();
+                                }
+                                self.autohost_enabled = true;
+                                let msg = crate::lang::t(
+                                    "autohost_set",
+                                    &[
+                                        ("name", &self.cfg.auto_host_game_name),
+                                        ("maxgames", &m.to_string()),
+                                        ("startplayers", &p.to_string()),
+                                    ],
+                                );
+                                self.reply_creator(&who, &msg).await;
+                                self.try_autohost().await;
+                            }
+                            _ => {
+                                self.reply_creator(&who, &crate::lang::t("autohost_usage", &[]))
+                                    .await;
+                            }
+                        }
                     }
                 }
             }

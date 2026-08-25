@@ -46,7 +46,7 @@
 | `!addban <name> [reason]`、`!ban <name> [reason]` | admin | 以名稱新增封鎖(記錄下令者、日期、原因;IP 留空)。 |
 | `!delban <name>`、`!unban <name>` | admin | 移除該名稱的封鎖。 |
 | `!checkban <name>` | admin | 查詢封鎖資訊(下令者、日期、原因)。 |
-| `!autohost [on\|off]` | admin | `on` 開啟自動開房(需已設 `auto_host_game_name`)並立即嘗試開房;`off` 關閉;無參數顯示狀態(開關、房名、最大場數、自動開始人數)。 |
+| `!autohost [on\|off\|<maxgames> <startplayers> [gamename]]` | admin | `on` 開啟自動開房(需已設 `auto_host_game_name`)並立即嘗試開房;`off` 關閉;`<maxgames> <startplayers> [gamename]` 於執行期更新 autohost 設定(gamename 可省略,沿用現有房名)、開啟 autohost 並立即嘗試開房;無參數顯示狀態(開關、房名、最大場數、自動開始人數)。 |
 | `!say <text>` | admin | 對 **所有 bnet 頻道** 廣播文字(不是送進遊戲)。 |
 | `!pub <name>` | admin | 建立 **公開** 遊戲(房名長度須 1–31)。 |
 | `!priv <name>` | admin | 建立 **私人** 遊戲(房名長度須 1–31)。 |
@@ -166,7 +166,8 @@
 ### autohost 行為
 
 - 啟用條件(初值):`auto_host_game_name` 非空、`auto_host_maximum_games > 0`、
-  `auto_host_auto_start_players > 0`。可用 `!autohost on/off` 執行期切換。
+  `auto_host_auto_start_players > 0`。可用 `!autohost on/off` 執行期切換,或用
+  `!autohost <maxgames> <startplayers> [gamename]` 執行期重設。
 - `try_autohost` 觸發時機:bnet 登入完成、開局(大廳空出)、遊戲刪除。
 - 會被以下情況擋下:`!disable` 停用中、autohost 關閉、目前已有大廳遊戲、進行中場數達
   `auto_host_maximum_games`、地圖無效、無任何 bnet 連線。

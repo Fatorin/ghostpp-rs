@@ -51,7 +51,7 @@ Source: `handle_bnet_command` (`src/bot/mod.rs`).
 | `!addban <name> [reason]`, `!ban <name> [reason]` | admin | Add a ban by name (records the issuing admin, date, reason; IP left blank). |
 | `!delban <name>`, `!unban <name>` | admin | Remove the ban for that name. |
 | `!checkban <name>` | admin | Query ban info (admin, date, reason). |
-| `!autohost [on\|off]` | admin | `on` enables autohost (requires `auto_host_game_name` set) and tries to host immediately; `off` disables; no argument shows status (state, game name, max games, auto-start players). |
+| `!autohost [on\|off\|<maxgames> <startplayers> [gamename]]` | admin | `on` enables autohost (requires `auto_host_game_name` set) and tries to host immediately; `off` disables; `<maxgames> <startplayers> [gamename]` updates the autohost settings at runtime (gamename optional, keeps the current one), enables autohost, and tries to host immediately; no argument shows status (state, game name, max games, auto-start players). |
 | `!say <text>` | admin | Broadcast text to **all bnet channels** (not into the game). |
 | `!pub <name>` | admin | Create a **public** game (name length must be 1–31). |
 | `!priv <name>` | admin | Create a **private** game (name length must be 1–31). |
@@ -172,7 +172,8 @@ This is the local operator console, with **no permission checks**.
 ### autohost behavior
 
 - Enabled (initial value) when: `auto_host_game_name` is non-empty, `auto_host_maximum_games > 0`, and
-  `auto_host_auto_start_players > 0`. Toggle at runtime with `!autohost on/off`.
+  `auto_host_auto_start_players > 0`. Toggle at runtime with `!autohost on/off`; reconfigure at runtime
+  with `!autohost <maxgames> <startplayers> [gamename]`.
 - `try_autohost` fires on: bnet login complete, game start (lobby freed), and game deletion.
 - It is blocked when: `!disable` is active, autohost is off, a lobby game already exists, in-progress count
   reaches `auto_host_maximum_games`, the map is invalid, or there are no bnet connections.
