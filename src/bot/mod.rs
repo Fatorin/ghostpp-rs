@@ -294,6 +294,9 @@ impl BotCore {
         // (mirrors what C++ !map generates for downloaded maps)
         let built = ::config::Config::builder()
             .set_override("bot_mappath", map_dir)
+            // Without bot_mapcfgpath, common.j/blizzard.j can't be read and the SHA1 comes up
+            // empty, so check_valid() rejects every runtime-loaded map
+            .and_then(|b| b.set_override("bot_mapcfgpath", self.cfg.map_cfg_path.clone()))
             .and_then(|b| b.set_override("map_localpath", file.to_string()))
             .and_then(|b| b.set_override("map_path", format!("Maps\\Download\\{file}")))
             .map(|b| b.build());
