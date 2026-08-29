@@ -1162,6 +1162,7 @@ impl GameActor {
             Some(p) if !p.finished_loading => {
                 p.finished_loading = true;
                 p.finished_loading_ticks = get_ticks();
+                p.checksums.clear();
                 p.name.clone()
             }
             _ => return,
