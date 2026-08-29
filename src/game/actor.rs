@@ -1142,7 +1142,13 @@ impl GameActor {
             W3GS_LEAVEGAME => {
                 let reason = GameProtocol::receive_w3gs_leavegame(data);
                 info!("[GAME: {}] pid={pid} sent LEAVEGAME (reason={reason})", self.cfg.game_name);
-                self.remove_player(pid, reason).await;
+                // The reason byte is the leaving client's own account of why it quit; it is never
+                // echoed on to the other clients. Mirrors C++ EventPlayerLeft (game_base.cpp),
+                // which discards it and always broadcasts PLAYERLEAVE_LOST - forwarding the raw
+                // value would let one client choose the leave code every other client's W3 has to
+                // render, including codes (won/draw/lost buildings) that change what the rest of
+                // the game sees happen.
+                self.remove_player(pid, PLAYERLEAVE_LOST as u32).await;
             }
             _ => debug!("[GAME: {}] unhandled player packet 0x{id:02X}", self.cfg.game_name),
         }
@@ -2447,6 +2453,18 @@ impl GameActor {
         self.conn_pid.remove(&player.conn_id);
         self.conns.remove(&player.conn_id);
 
+        // Throw away anything this player had queued but not yet broadcast. The moment
+        // W3GS_PLAYERLEAVE_OTHERS goes out below, every client tears down that player, so a
+        // W3GS_INCOMING_ACTION arriving on the next beat still carrying their PID makes the
+        // client look up a player it no longer has - which is exactly how quitting mid-order
+        // (ALT+Q+Q, whose LEAVEGAME can land in the same beat as the player's last actions)
+        // takes the remaining clients down with it. It only hits when the queue happened to
+        // be non-empty at that instant, hence the "sometimes".
+        //
+        // Purging here rather than at send time keeps every client and the replay on the same
+        // stream: the actions are gone before anyone - or the recorder - has seen them.
+        self.actions.retain(|a| a.pid != pid);
+
         // Grab the slot's team/colour first (once freed, the pid is zeroed and can no longer be looked up)
         let (team, colour) = self
             .slot_index_of_pid(pid)
@@ -3143,6 +3161,36 @@ mod tests {
             !actor.desync_warned,
             "players agreeing on every turn must not be reported as desynced"
         );
+    }
+
+    /// A player quitting mid-order must not leave their actions behind in the queue: the batch
+    /// that goes out on the next beat would then carry a PID every client has already torn down.
+    ///
+    /// Regression test: remove_player never touched the action queue, so ALT+Q+Q - which can
+    /// land LEAVEGAME in the same beat as the player's last orders - had the remaining clients
+    /// look up a player they had just removed, and W3 crashed to desktop. It only fired when
+    /// the queue happened to be non-empty at that instant, which is what made it intermittent.
+    #[tokio::test]
+    async fn leaving_player_takes_their_queued_actions_with_them() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+        assert!(actor.game_loaded, "all players had finished loading");
+
+        for pid in 1..=3u8 {
+            actor.actions.push_back(IncomingAction {
+                pid,
+                crc: vec![0, 0, 0, 0],
+                action: vec![0x10, pid],
+            });
+        }
+
+        actor.remove_player(2, PLAYERLEAVE_LOST as u32).await;
+
+        assert!(
+            actor.actions.iter().all(|a| a.pid != 2),
+            "the departing player's queued actions must go with them"
+        );
+        assert_eq!(actor.actions.len(), 2, "everyone else's actions must survive");
     }
 
     /// A genuine divergence is still caught.
