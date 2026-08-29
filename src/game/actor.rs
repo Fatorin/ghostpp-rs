@@ -145,6 +145,9 @@ struct LobbyPlayer {
     lagging: bool,
     /// The ticks when lag started (used to compute lag duration)
     started_lagging_ticks: u64,
+    /// Voted to drop the laggers via the lag screen's "Drop Players" button (W3GS_DROPREQ).
+    /// Cleared every time a new lag screen opens (mirrors C++ CGamePlayer::m_DropVote)
+    drop_vote: bool,
 
     // ---- GProxy++ (mirrors C++ CGamePlayer) ----
     /// The client has reported using GProxy (received a GPS_INIT)
@@ -847,12 +850,7 @@ impl GameActor {
             // ---- in-game ----
             "drop" => {
                 if self.game_loaded && self.lagging {
-                    let laggers: Vec<u8> =
-                        self.players.values().filter(|p| p.lagging).map(|p| p.pid).collect();
-                    for pid in laggers {
-                        self.remove_player(pid, PLAYERLEAVE_DISCONNECT as u32).await;
-                    }
-                    self.send_all_chat(&crate::lang::t("drop_laggers", &[])).await;
+                    self.stop_laggers("drop_laggers").await;
                 } else {
                     self.reply_to(req_pid, &crate::lang::t("drop_none", &[])).await;
                 }
@@ -1150,6 +1148,7 @@ impl GameActor {
                 // the game sees happen.
                 self.remove_player(pid, PLAYERLEAVE_LOST as u32).await;
             }
+            W3GS_DROPREQ => self.handle_drop_request(pid).await,
             _ => debug!("[GAME: {}] unhandled player packet 0x{id:02X}", self.cfg.game_name),
         }
     }
@@ -1337,6 +1336,10 @@ impl GameActor {
                         p.started_lagging_ticks = now;
                     }
                 }
+                // A fresh lag screen starts a fresh vote (mirrors C++ resetting m_DropVote)
+                for p in self.players.values_mut() {
+                    p.drop_vote = false;
+                }
                 let names: Vec<String> = laggers
                     .iter()
                     .filter_map(|(pid, _)| self.players.get(pid).map(|p| p.name.clone()))
@@ -1429,6 +1432,61 @@ impl GameActor {
             return;
         }
         self.send_all_actions().await;
+    }
+
+    /// Remove everyone currently on the lag screen (mirrors C++ StopLaggers).
+    /// `reason_key` is the lang key of the message announced to the game afterwards.
+    async fn stop_laggers(&mut self, reason_key: &str) {
+        let laggers: Vec<u8> =
+            self.players.values().filter(|p| p.lagging).map(|p| p.pid).collect();
+        if laggers.is_empty() {
+            return;
+        }
+        for pid in laggers {
+            self.remove_player(pid, PLAYERLEAVE_DISCONNECT as u32).await;
+        }
+        // Close the lag screen right here instead of waiting for the next beat to notice, so
+        // the action loop resumes immediately - the clients drop the laggers off their own lag
+        // screens on the PLAYERLEAVE that remove_player just broadcast.
+        if !self.players.values().any(|p| p.lagging) {
+            self.lagging = false;
+        }
+        self.send_all_chat(&crate::lang::t(reason_key, &[])).await;
+    }
+
+    /// The lag screen's "Drop Players" button (W3GS_DROPREQ). Without this the button is inert,
+    /// which is what leaves a game stuck behind a player whose connection has died but whose
+    /// socket has not closed. W3 only enables the button once the lag screen has been up for
+    /// ~45 seconds, so that wait is already enforced client-side.
+    /// Drops the laggers once more than half the players have voted (mirrors C++
+    /// EventPlayerDropRequest).
+    async fn handle_drop_request(&mut self, pid: u8) {
+        if !self.lagging {
+            return;
+        }
+        // One vote per player per lag screen; votes are cleared when the next screen opens
+        let name = match self.players.get_mut(&pid) {
+            Some(p) if !p.drop_vote => {
+                p.drop_vote = true;
+                p.name.clone()
+            }
+            _ => return,
+        };
+        let votes = self.players.values().filter(|p| p.drop_vote).count();
+        let total = self.players.len();
+        info!(
+            "[GAME: {}] [{name}] voted to drop the laggers ({votes}/{total})",
+            self.cfg.game_name
+        );
+        self.send_all_chat(&crate::lang::t(
+            "drop_voted",
+            &[("name", &name), ("votes", &votes.to_string()), ("total", &total.to_string())],
+        ))
+        .await;
+        // Strictly more than half, matching C++ ((float)Votes / m_Players.size( ) > 0.50f)
+        if votes * 2 > total {
+            self.stop_laggers("drop_by_vote").await;
+        }
     }
 
     /// Batch-send the queued actions (mirrors C++ SendAllActions: split into INCOMING_ACTION2 when >1452 bytes)
@@ -1815,6 +1873,7 @@ impl GameActor {
                 checksums: Default::default(),
                 lagging: false,
                 started_lagging_ticks: 0,
+                drop_vote: false,
                 gproxy: false,
                 gproxy_disconnected: false,
                 gproxy_key: rand::random::<u32>(),
@@ -3054,6 +3113,7 @@ mod tests {
             checksums: Default::default(),
             lagging: false,
             started_lagging_ticks: 0,
+            drop_vote: false,
             gproxy,
             gproxy_disconnected: false,
             gproxy_key: 0,
@@ -3191,6 +3251,35 @@ mod tests {
             "the departing player's queued actions must go with them"
         );
         assert_eq!(actor.actions.len(), 2, "everyone else's actions must survive");
+    }
+
+    /// The lag screen's "Drop Players" button (W3GS_DROPREQ) has to actually drop the lagger
+    /// once more than half the players have pressed it.
+    ///
+    /// Regression test: the packet was not handled at all, so the button did nothing and a game
+    /// stuck behind a player whose connection had died - but whose socket was still open, so
+    /// the actor never saw a close - could only be rescued by an admin typing !drop.
+    #[tokio::test]
+    async fn drop_request_drops_the_lagger_once_a_majority_votes() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+        actor.lagging = true;
+        actor.players.get_mut(&3).unwrap().lagging = true;
+
+        actor.handle_drop_request(1).await;
+        assert!(actor.players.contains_key(&3), "1 of 3 votes is not a majority");
+        actor.handle_drop_request(1).await;
+        assert!(
+            actor.players.contains_key(&3),
+            "pressing the button twice must not count twice"
+        );
+
+        actor.handle_drop_request(2).await;
+        assert!(
+            !actor.players.contains_key(&3),
+            "2 of 3 votes must drop the lagger"
+        );
+        assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
     }
 
     /// A genuine divergence is still caught.

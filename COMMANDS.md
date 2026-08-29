@@ -134,6 +134,10 @@ Handled by GameActor (`handle_admin_command`):
 | `!hcl [str]` | admin | No argument shows the current HCL string; setting checks game-started / length / allowed chars (see Special mechanics). |
 | `!clearhcl` | admin | Clear the HCL string (rejected if the game has started). |
 
+> `!drop` is not the only way out: any player can press **Drop Players** on the in-game lag
+> screen (W3 enables it after ~45 s), and once more than half the players have pressed it the
+> laggers are dropped without an admin.
+
 > Any other string is silently ignored by GameActor (debug log only).
 
 ---
