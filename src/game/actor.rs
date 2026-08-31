@@ -50,6 +50,9 @@ pub const CHECKSUM_ALIGN_MAX_SKEW: usize = 12;
 /// Consecutive checksums that must match before an offset is accepted as the true alignment.
 /// One value matching is chance; four in a row is the same game state.
 pub const CHECKSUM_ALIGN_CONFIRM: usize = 4;
+/// How many times one game may report a change in who has diverged before the log goes quiet.
+/// A real desync reports once and stays put; this only bites on a game whose states flap.
+pub const DESYNC_REPORT_LIMIT: u32 = 10;
 
 /// Cap on the GProxy++ replay buffer held per disconnected player.
 ///
@@ -238,8 +241,18 @@ struct GameActor {
     lagging: bool,
     /// The ticks of the last lag screen resend (the W3 lag screen auto-dismisses after ~65s, so it is re-shown every 60s)
     last_lag_screen_reset: u64,
-    /// Already warned about desync (to avoid log spam)
+    /// Already told the players about a desync (the chat message is sent once per game)
     desync_warned: bool,
+    /// Comparison rounds completed = the turn currently being compared. Reported with a desync
+    /// so the moment can be found in the saved replay.
+    checksum_turn: u32,
+    /// Who is currently reporting a different game state from the largest group (sorted).
+    /// Empty while everyone agrees.
+    desynced: Vec<String>,
+    /// The turn the current divergence started on
+    desync_started_turn: u32,
+    /// Desync changes logged so far (see [`DESYNC_REPORT_LIMIT`])
+    desync_reports: u32,
     /// The per-player checksum streams have been lined up on a common turn (see
     /// [`Self::align_checksum_streams`]). No comparison happens until this is true.
     checksums_aligned: bool,
@@ -311,6 +324,10 @@ impl GameActor {
             lagging: false,
             last_lag_screen_reset: 0,
             desync_warned: false,
+            checksum_turn: 0,
+            desynced: Vec::new(),
+            desync_started_turn: 0,
+            desync_reports: 0,
             checksums_aligned: false,
             player_records: Vec::new(),
             loaded_time: 0,
@@ -1339,38 +1356,97 @@ impl GameActor {
             // Pop one checksum from every player: after align_checksum_streams position N of
             // each queue is that player's view of the same turn, and popping in lockstep keeps
             // it that way
-            let mut round: Vec<(u32, String)> = Vec::with_capacity(self.players.len());
+            let mut round: Vec<(u32, String, bool)> = Vec::with_capacity(self.players.len());
             for p in self.players.values_mut() {
-                round.push((p.checksums.pop_front().unwrap(), p.name.clone()));
+                round.push((p.checksums.pop_front().unwrap(), p.name.clone(), p.gproxy));
             }
+            self.checksum_turn += 1;
+            let turn = self.checksum_turn;
+
             let first = round[0].0;
-            if round.iter().all(|(c, _)| *c == first) || self.desync_warned {
+            if round.iter().all(|(c, _, _)| *c == first) {
+                // Everyone agrees again. A real desync never recovers, so this line is what
+                // says a divergence already reported was a blip and not worth chasing.
+                if !self.desynced.is_empty() {
+                    let lasted = turn.saturating_sub(self.desync_started_turn);
+                    let who = self.desynced.join(", ");
+                    self.desynced.clear();
+                    if self.note_desync_change() {
+                        info!(
+                            "[GAME: {}] game states agree again at turn {turn} - {who} had diverged for {lasted} turn(s)",
+                            self.cfg.game_name
+                        );
+                    }
+                }
                 continue;
             }
-            self.desync_warned = true;
 
             // Group the players by the game state they reported, mirroring the C++ bins
             // (game_base.cpp:2830-2870). A lone outlier against a large agreeing group is a real
             // desync; everyone reporting something different means the comparison itself is
             // misaligned, and this line is what tells the two apart in a bug report.
-            let mut bins: std::collections::HashMap<u32, Vec<String>> = Default::default();
-            for (checksum, name) in round {
-                bins.entry(checksum).or_default().push(name);
+            let mut bins: std::collections::HashMap<u32, Vec<(String, bool)>> = Default::default();
+            for (checksum, name, gproxy) in round {
+                bins.entry(checksum).or_default().push((name, gproxy));
             }
-            let mut groups: Vec<(u32, Vec<String>)> = bins.into_iter().collect();
-            groups.sort_by_key(|(_, names)| std::cmp::Reverse(names.len()));
-            let summary = groups
-                .iter()
-                .map(|(checksum, names)| format!("{checksum:08X}: {}", names.join(", ")))
-                .collect::<Vec<_>>()
-                .join(" | ");
+            let mut groups: Vec<(u32, Vec<(String, bool)>)> = bins.into_iter().collect();
+            groups.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
 
+            // Everyone outside the largest group - the players to look at in the replay
+            let mut diverged: Vec<String> = groups
+                .iter()
+                .skip(1)
+                .flat_map(|(_, members)| members.iter().map(|(name, _)| name.clone()))
+                .collect();
+            diverged.sort();
+
+            // Only report when the picture changes: a real desync holds the same set of players
+            // for the rest of the game and would otherwise log on every single turn
+            if diverged != self.desynced {
+                self.desynced = diverged;
+                self.desync_started_turn = turn;
+                if self.note_desync_change() {
+                    let summary = groups
+                        .iter()
+                        .map(|(checksum, members)| {
+                            let who = members
+                                .iter()
+                                .map(|(name, gproxy)| {
+                                    format!("{name}{}", if *gproxy { " (GProxy)" } else { "" })
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!("{checksum:08X}: {who}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let secs = crate::util::get_time().saturating_sub(self.loaded_time);
+                    warn!(
+                        "[GAME: {}] desync detected! turn {turn}, {secs}s into the game - {summary}",
+                        self.cfg.game_name
+                    );
+                }
+            }
+
+            // The players are told once; after that it is the log's job
+            if !self.desync_warned {
+                self.desync_warned = true;
+                self.send_all_chat(&crate::lang::t("desync_detected", &[])).await;
+            }
+        }
+    }
+
+    /// Rate limit for the desync log, so a game whose states flap cannot fill it.
+    /// Returns whether this change should still be logged.
+    fn note_desync_change(&mut self) -> bool {
+        self.desync_reports += 1;
+        if self.desync_reports == DESYNC_REPORT_LIMIT {
             warn!(
-                "[GAME: {}] desync detected! player game states have diverged - {summary}",
+                "[GAME: {}] desync log limit reached, further changes for this game are not logged",
                 self.cfg.game_name
             );
-            self.send_all_chat(&crate::lang::t("desync_detected", &[])).await;
         }
+        self.desync_reports <= DESYNC_REPORT_LIMIT
     }
 
     /// Convert the lag time window and current latency into "the number of batches behind that triggers the lag screen" (at least 1)
@@ -3360,6 +3436,44 @@ mod tests {
             actor.players[&1].checksums.len(),
             1,
             "the proxied players should be exactly one turn ahead, not misaligned"
+        );
+    }
+
+    /// A divergence that recovers on the next turn is a blip; one that holds is real. Telling
+    /// them apart in the log means tracking who is currently diverged, rather than latching a
+    /// single "already warned" flag and going silent for the rest of the game.
+    #[tokio::test]
+    async fn a_transient_divergence_is_tracked_and_cleared() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        feed_turns(&mut actor, 0, 24);
+        actor.check_desync().await;
+        assert!(
+            actor.desynced.is_empty(),
+            "an agreeing stretch must record no divergence"
+        );
+
+        // one turn where pid 2 sees something else
+        for p in actor.players.values_mut() {
+            p.checksums.push_back(turn_checksum(24));
+        }
+        actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999_9999;
+        actor.check_desync().await;
+        assert_eq!(
+            actor.desynced,
+            vec!["p2".to_string()],
+            "the odd player out must be recorded by name"
+        );
+        let started = actor.desync_started_turn;
+
+        // ...and everyone agrees again
+        feed_turns(&mut actor, 25, 3);
+        actor.check_desync().await;
+        assert!(actor.desynced.is_empty(), "a recovered blip must clear");
+        assert!(
+            actor.checksum_turn > started,
+            "the turn counter must keep advancing so a desync can be located in the replay"
         );
     }
 
