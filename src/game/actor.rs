@@ -53,6 +53,10 @@ pub const CHECKSUM_ALIGN_CONFIRM: usize = 4;
 /// How many times one game may report a change in who has diverged before the log goes quiet.
 /// A real desync reports once and stays put; this only bites on a game whose states flap.
 pub const DESYNC_REPORT_LIMIT: u32 = 10;
+/// How many recently agreed checksums to keep, so a divergence can be checked against them.
+/// A player reporting a state the rest of the game was in a few turns ago is a stream that
+/// slipped, not a game that parted company - and that is the distinction worth logging.
+pub const DESYNC_HISTORY: usize = 48;
 
 /// Cap on the GProxy++ replay buffer held per disconnected player.
 ///
@@ -253,6 +257,8 @@ struct GameActor {
     desync_started_turn: u32,
     /// Desync changes logged so far (see [`DESYNC_REPORT_LIMIT`])
     desync_reports: u32,
+    /// The last [`DESYNC_HISTORY`] checksums the game agreed on, newest last
+    recent_checksums: std::collections::VecDeque<u32>,
     /// The per-player checksum streams have been lined up on a common turn (see
     /// [`Self::align_checksum_streams`]). No comparison happens until this is true.
     checksums_aligned: bool,
@@ -328,6 +334,7 @@ impl GameActor {
             desynced: Vec::new(),
             desync_started_turn: 0,
             desync_reports: 0,
+            recent_checksums: Default::default(),
             checksums_aligned: false,
             player_records: Vec::new(),
             loaded_time: 0,
@@ -1365,6 +1372,10 @@ impl GameActor {
 
             let first = round[0].0;
             if round.iter().all(|(c, _, _)| *c == first) {
+                self.recent_checksums.push_back(first);
+                while self.recent_checksums.len() > DESYNC_HISTORY {
+                    self.recent_checksums.pop_front();
+                }
                 // Everyone agrees again. A real desync never recovers, so this line is what
                 // says a divergence already reported was a blip and not worth chasing.
                 if !self.desynced.is_empty() {
@@ -1416,7 +1427,18 @@ impl GameActor {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            format!("{checksum:08X}: {who}")
+                            // Is this the state the rest of the game was in a few turns ago? If
+                            // so their stream slipped a turn and the game itself is fine; if the
+                            // value matches no recent turn, the game state really has parted
+                            // company. That is the one thing the log could never tell before.
+                            let age = self
+                                .recent_checksums
+                                .iter()
+                                .rev()
+                                .position(|c| c == checksum)
+                                .map(|back| format!(" [= turn {}]", turn - 1 - back as u32))
+                                .unwrap_or_else(|| " [matches no recent turn]".to_string());
+                            format!("{checksum:08X}{age}: {who}")
                         })
                         .collect::<Vec<_>>()
                         .join(" | ");
@@ -3474,6 +3496,37 @@ mod tests {
         assert!(
             actor.checksum_turn > started,
             "the turn counter must keep advancing so a desync can be located in the replay"
+        );
+    }
+
+    /// A divergence has to say whether the odd player out is reporting a state the rest of the
+    /// game was in a few turns ago - a stream that slipped, which is harmless - or a state that
+    /// matches no recent turn at all, which is a game that really has parted company. Without
+    /// that, a checksum mismatch in the log is unactionable.
+    #[tokio::test]
+    async fn a_slipped_stream_is_distinguishable_from_a_parted_state() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        feed_turns(&mut actor, 0, 24);
+        actor.check_desync().await;
+        assert_eq!(
+            actor.recent_checksums.len(),
+            24,
+            "agreed turns must be kept so a later divergence can be checked against them"
+        );
+        assert_eq!(actor.recent_checksums.back().copied(), Some(turn_checksum(23)));
+
+        // pid 2 reports the turn before everyone else - a slipped stream
+        for p in actor.players.values_mut() {
+            p.checksums.push_back(turn_checksum(24));
+        }
+        actor.players.get_mut(&2).unwrap().checksums[0] = turn_checksum(23);
+        actor.check_desync().await;
+        assert_eq!(actor.desynced, vec!["p2".to_string()]);
+        assert!(
+            actor.recent_checksums.contains(&turn_checksum(23)),
+            "the value pid 2 reported is a turn the game agreed on, and the log says so"
         );
     }
 
