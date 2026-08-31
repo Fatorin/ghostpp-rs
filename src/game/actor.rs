@@ -39,6 +39,18 @@ pub const SYNC_TOLERANCE_MS: u32 = 5_000;
 pub const SYNC_WINDOW_MIN_MS: u32 = 500;
 pub const SYNC_WINDOW_MAX_MS: u32 = 30_000;
 
+/// The largest head start (in keepalives) that desync detection will absorb rather than report.
+///
+/// A GProxy++ client is fed empty actions locally and its W3 answers each of them with a
+/// keepalive that GProxy swallows, so the host's first keepalive from that client is already
+/// its view of a later turn than the same keepalive from a client connected directly. The
+/// offset is bounded by bot_reconnectwaittime (gproxy_empty_actions, capped at 9), so a dozen
+/// is comfortably above anything a well-behaved client can produce.
+pub const CHECKSUM_ALIGN_MAX_SKEW: usize = 12;
+/// Consecutive checksums that must match before an offset is accepted as the true alignment.
+/// One value matching is chance; four in a row is the same game state.
+pub const CHECKSUM_ALIGN_CONFIRM: usize = 4;
+
 /// Cap on the GProxy++ replay buffer held per disconnected player.
 ///
 /// A reconnect pushes this whole buffer into the player's write queue in one go, preceded by
@@ -228,6 +240,9 @@ struct GameActor {
     last_lag_screen_reset: u64,
     /// Already warned about desync (to avoid log spam)
     desync_warned: bool,
+    /// The per-player checksum streams have been lined up on a common turn (see
+    /// [`Self::align_checksum_streams`]). No comparison happens until this is true.
+    checksums_aligned: bool,
     /// Participation records of players who left (written to db when the game ends)
     player_records: Vec<crate::db::GamePlayerRecord>,
     /// The time everyone finished loading (seconds; used to compute game duration)
@@ -296,6 +311,7 @@ impl GameActor {
             lagging: false,
             last_lag_screen_reset: 0,
             desync_warned: false,
+            checksums_aligned: false,
             player_records: Vec::new(),
             loaded_time: 0,
             start_loading_ticks: 0,
@@ -1246,14 +1262,83 @@ impl GameActor {
         }
     }
 
+    /// Line the per-player checksum queues up on a common turn, once, before the first
+    /// comparison.
+    ///
+    /// Position N of each queue is only "the same turn for everybody" if every client starts
+    /// answering at the same turn, and a GProxy++ client does not: it is fed empty actions
+    /// locally and GProxy swallows the keepalives they produce, so the host's first checksum
+    /// from that client is already its view of a later turn than the first checksum from a
+    /// client connected directly. Comparing position 0 against position 0 then reports a
+    /// desync in the first second of every game with a mixed lobby, on games that go on to
+    /// play out perfectly normally for the next forty minutes.
+    ///
+    /// So: take the checksum sequence the largest group of players agrees on as the reference,
+    /// and for everyone else look for the small offset that makes their sequence match it.
+    /// A player who cannot be lined up at any offset is left alone - that is a real divergence
+    /// and the comparison below is meant to report it.
+    ///
+    /// Returns false while there is not yet enough queued to decide, so the caller waits.
+    fn align_checksum_streams(&mut self) -> bool {
+        let needed = CHECKSUM_ALIGN_MAX_SKEW + CHECKSUM_ALIGN_CONFIRM;
+        if self.players.is_empty()
+            || self.players.values().any(|p| p.checksums.len() < needed)
+        {
+            return false;
+        }
+        let sig = |p: &LobbyPlayer, off: usize| -> Vec<u32> {
+            p.checksums.iter().skip(off).take(CHECKSUM_ALIGN_CONFIRM).copied().collect()
+        };
+
+        // The reference is whatever the most players already agree on at offset 0
+        let mut bins: std::collections::HashMap<Vec<u32>, usize> = Default::default();
+        for p in self.players.values() {
+            *bins.entry(sig(p, 0)).or_default() += 1;
+        }
+        let reference = bins
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(s, _)| s)
+            .unwrap_or_default();
+
+        let mut realigned: Vec<(String, usize)> = Vec::new();
+        for p in self.players.values_mut() {
+            if sig(p, 0) == reference {
+                continue;
+            }
+            if let Some(skew) =
+                (1..=CHECKSUM_ALIGN_MAX_SKEW).find(|&off| sig(p, off) == reference)
+            {
+                p.checksums.drain(..skew);
+                realigned.push((p.name.clone(), skew));
+            }
+        }
+        if !realigned.is_empty() {
+            let who = realigned
+                .iter()
+                .map(|(name, skew)| format!("{name} (+{skew})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            info!(
+                "[GAME: {}] checksum streams lined up, absorbed a head start from: {who}",
+                self.cfg.game_name
+            );
+        }
+        self.checksums_aligned = true;
+        true
+    }
+
     /// Desync detection: when every player has a checksum pending comparison, compare them one by one (mirrors C++ CheckSyncs)
     async fn check_desync(&mut self) {
+        if !self.checksums_aligned && !self.align_checksum_streams() {
+            return;
+        }
         while !self.players.is_empty()
             && self.players.values().all(|p| !p.checksums.is_empty())
         {
-            // Pop one checksum from every player: they are queued in turn order, so position N
-            // of each queue is that player's view of the same turn - which only holds because
-            // the queues are cleared the moment the game loads (see check_loading_complete)
+            // Pop one checksum from every player: after align_checksum_streams position N of
+            // each queue is that player's view of the same turn, and popping in lockstep keeps
+            // it that way
             let mut round: Vec<(u32, String)> = Vec::with_capacity(self.players.len());
             for p in self.players.values_mut() {
                 round.push((p.checksums.pop_front().unwrap(), p.name.clone()));
@@ -3190,6 +3275,20 @@ mod tests {
         actor
     }
 
+    /// One deterministic turn's checksum, so a test stream reads like a real one
+    fn turn_checksum(turn: u32) -> u32 {
+        0x1000_0000u32.wrapping_add(turn.wrapping_mul(0x9E37_79B9))
+    }
+
+    /// Queue `turns` of an agreeing checksum stream for every player, starting at `from`
+    fn feed_turns(actor: &mut GameActor, from: u32, turns: u32) {
+        for p in actor.players.values_mut() {
+            for t in from..from + turns {
+                p.checksums.push_back(turn_checksum(t));
+            }
+        }
+    }
+
     /// Checksums that arrive while players are still loading must not offset one player against
     /// the others once the game starts.
     ///
@@ -3211,16 +3310,56 @@ mod tests {
             "the queues must be levelled at game start"
         );
 
-        // three turns in perfect agreement
-        for turn in 0..3u32 {
-            for p in actor.players.values_mut() {
-                p.checksums.push_back(0x1000 + turn);
-            }
-            actor.check_desync().await;
-        }
+        // enough turns in perfect agreement for the comparison to actually run
+        feed_turns(&mut actor, 0, 24);
+        actor.check_desync().await;
+        assert!(actor.checksums_aligned, "agreeing streams must line up");
         assert!(
             !actor.desync_warned,
             "players agreeing on every turn must not be reported as desynced"
+        );
+    }
+
+    /// A client behind GProxy++ answers its first turns locally - GProxy feeds it empty actions
+    /// and swallows the keepalives - so the host's first checksum from that client is already a
+    /// later turn than the first checksum from a client connected directly. That head start is
+    /// an artefact of the proxy, not a divergence.
+    ///
+    /// Regression test: position 0 was compared against position 0 regardless, so every lobby
+    /// mixing GProxy++ and direct players reported a desync about one second after loading -
+    /// 17 games out of 17 in one day's logs, each one then playing out normally for the next
+    /// forty minutes, with the warning chat-spammed to everyone in the game.
+    #[tokio::test]
+    async fn gproxy_head_start_is_not_reported_as_a_desync() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        // pids 1 and 2 came through GProxy++ and are one turn ahead; pid 3 is connected directly
+        feed_turns(&mut actor, 1, 24);
+        let direct = actor.players.get_mut(&3).unwrap();
+        direct.checksums.clear();
+        for t in 0..24u32 {
+            direct.checksums.push_back(turn_checksum(t));
+        }
+
+        actor.check_desync().await;
+
+        assert!(actor.checksums_aligned, "the streams must be lined up");
+        assert!(
+            !actor.desync_warned,
+            "a proxy head start must not be reported as a desync"
+        );
+        // The head start was dropped rather than compared, so the direct player's 24 turns all
+        // got matched against turns 1..24 of the two proxied streams, whose turn 25 is still
+        // waiting for him
+        assert!(
+            actor.players[&3].checksums.is_empty(),
+            "the direct player's turns should all have been compared"
+        );
+        assert_eq!(
+            actor.players[&1].checksums.len(),
+            1,
+            "the proxied players should be exactly one turn ahead, not misaligned"
         );
     }
 
@@ -3283,19 +3422,44 @@ mod tests {
         assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
     }
 
-    /// A genuine divergence is still caught.
+    /// A genuine divergence is still caught: aligning the streams must not swallow a player
+    /// whose game state really has parted company with everyone else's.
     #[tokio::test]
     async fn genuine_desync_is_still_detected() {
         let mut actor = actor_with_players(3);
         actor.check_loading_complete().await;
 
+        // everyone agrees long enough to line up, then pid 2 goes its own way
+        feed_turns(&mut actor, 0, 24);
+        actor.check_desync().await;
+        assert!(actor.checksums_aligned && !actor.desync_warned);
+
         for p in actor.players.values_mut() {
-            p.checksums.push_back(0x1234);
+            p.checksums.push_back(turn_checksum(24));
         }
-        actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999;
+        actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999_9999;
         actor.check_desync().await;
 
         assert!(actor.desync_warned, "a diverging player must be reported");
+    }
+
+    /// A player whose stream cannot be lined up at any offset is a real divergence, not a proxy
+    /// head start, and must still be reported.
+    #[tokio::test]
+    async fn a_stream_that_never_matches_is_still_a_desync() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        feed_turns(&mut actor, 0, 24);
+        let odd = actor.players.get_mut(&2).unwrap();
+        odd.checksums.clear();
+        for t in 0..24u32 {
+            odd.checksums.push_back(turn_checksum(t) ^ 0xDEAD_BEEF);
+        }
+
+        actor.check_desync().await;
+
+        assert!(actor.desync_warned, "an unalignable stream must be reported");
     }
 
     /// Drive one player's write queue past its byte budget and return the actor afterwards.
