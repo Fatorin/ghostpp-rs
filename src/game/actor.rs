@@ -1314,27 +1314,49 @@ impl GameActor {
             p.checksums.iter().skip(off).take(CHECKSUM_ALIGN_CONFIRM).copied().collect()
         };
 
-        // The reference is whatever the most players already agree on at offset 0
-        let mut bins: std::collections::HashMap<Vec<u32>, usize> = Default::default();
+        // Every player votes, at every offset it could be starting from, for the sequence it
+        // would then report. The sequence the most players can reach is the turn they are all
+        // genuinely on, and each player's own offset is how far its stream had slipped.
+        //
+        // Voting over all offsets rather than trimming the odd ones out to fit a fixed
+        // reference is what makes this work in both directions. The first attempt pinned the
+        // reference to whatever the largest group reported at offset 0 and only ever trimmed
+        // the others, which cannot help when it is the *large* group that is a turn ahead -
+        // and that is exactly the case in the field, where the GProxy++ players are the
+        // majority and the ones carrying the extra leading checksum. It realigned nobody in a
+        // whole day of games.
+        let mut votes: std::collections::HashMap<Vec<u32>, std::collections::HashMap<u8, usize>> =
+            Default::default();
         for p in self.players.values() {
-            *bins.entry(sig(p, 0)).or_default() += 1;
+            for off in 0..=CHECKSUM_ALIGN_MAX_SKEW {
+                votes.entry(sig(p, off)).or_default().entry(p.pid).or_insert(off);
+            }
         }
-        let reference = bins
-            .into_iter()
-            .max_by_key(|(_, n)| *n)
-            .map(|(s, _)| s)
-            .unwrap_or_default();
+        // Most players first; among ties the alignment that throws away the fewest turns
+        let best = votes.into_iter().max_by_key(|(_, per_player)| {
+            (
+                per_player.len(),
+                std::cmp::Reverse(per_player.values().sum::<usize>()),
+            )
+        });
+        let offsets = match best {
+            // Only trust an alignment a majority of the game agrees on. Anything less and the
+            // streams are not merely offset, which the comparison below is there to report.
+            Some((_, o)) if o.len() * 2 > self.players.len() => o,
+            _ => {
+                self.checksums_aligned = true;
+                return true;
+            }
+        };
 
         let mut realigned: Vec<(String, usize)> = Vec::new();
         for p in self.players.values_mut() {
-            if sig(p, 0) == reference {
-                continue;
-            }
-            if let Some(skew) =
-                (1..=CHECKSUM_ALIGN_MAX_SKEW).find(|&off| sig(p, off) == reference)
-            {
-                p.checksums.drain(..skew);
-                realigned.push((p.name.clone(), skew));
+            match offsets.get(&p.pid) {
+                Some(&skew) if skew > 0 => {
+                    p.checksums.drain(..skew);
+                    realigned.push((p.name.clone(), skew));
+                }
+                _ => {}
             }
         }
         if !realigned.is_empty() {
@@ -1401,7 +1423,16 @@ impl GameActor {
                 bins.entry(checksum).or_default().push((name, gproxy));
             }
             let mut groups: Vec<(u32, Vec<(String, bool)>)> = bins.into_iter().collect();
-            groups.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
+            // Largest group first, and among equal-sized groups the one that is not already
+            // the suspect. Without that tie-break a two-way split - which is what the last
+            // seconds of a game look like once everyone starts quitting - hands the "majority"
+            // to whichever group the sort happened to put first and blames the other, flipping
+            // every turn and filling the log with contradictory lines.
+            let suspects = &self.desynced;
+            groups.sort_by_key(|(_, members)| {
+                let all_suspect = members.iter().all(|(name, _)| suspects.contains(name));
+                (std::cmp::Reverse(members.len()), all_suspect)
+            });
 
             // Everyone outside the largest group - the players to look at in the replay
             let mut diverged: Vec<String> = groups
@@ -2724,6 +2755,12 @@ impl GameActor {
 
         info!("[GAME: {}] player [{}] (pid={pid}) left", self.cfg.game_name, player.name);
 
+        // Someone walking out is not the game agreeing again. Drop them from the suspect list
+        // quietly, so the next round does not announce a recovery that never happened - which
+        // is what "game states agree again, X had diverged for 7 turn(s)" logged three
+        // milliseconds after X sent LEAVEGAME actually was.
+        self.desynced.retain(|name| name != &player.name);
+
         // Replay: record the departure (loading blocks are placed during loading; mirrors C++ EventPlayerDeleted)
         if self.game_loading || self.game_loaded {
             let during_loading = self.game_loading;
@@ -3587,6 +3624,63 @@ mod tests {
             "2 of 3 votes must drop the lagger"
         );
         assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
+    }
+
+    /// The head start can just as easily be on the *majority*: it is the GProxy++ players who
+    /// carry the extra leading checksum, and in a normal lobby they outnumber everyone else.
+    ///
+    /// Regression test: the first attempt pinned the reference to whatever the largest group
+    /// reported at offset 0 and only ever trimmed the others, so it could only absorb a skew
+    /// pointing one way. In production it realigned nobody at all - a whole day of games still
+    /// reported "desync detected! turn 1" with the split falling exactly on GProxy++ usage.
+    #[tokio::test]
+    async fn a_head_start_on_the_majority_is_absorbed_too() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        feed_turns(&mut actor, 0, 24);
+        // pids 1 and 2 are behind GProxy++ and report one turn nobody else ever sees
+        for pid in [1u8, 2] {
+            actor.players.get_mut(&pid).unwrap().checksums.push_front(0xFEED_FACE);
+        }
+
+        actor.check_desync().await;
+
+        assert!(actor.checksums_aligned, "the streams must be lined up");
+        assert!(
+            !actor.desync_warned,
+            "a head start on the majority must not be reported as a desync"
+        );
+        assert!(
+            actor.players.values().all(|p| p.checksums.is_empty()),
+            "with the extra turn dropped all three streams line up exactly"
+        );
+    }
+
+    /// A diverged player quitting is not the game agreeing again.
+    ///
+    /// Regression test: the log announced "game states agree again, X had diverged for 7
+    /// turn(s)" three milliseconds after X sent LEAVEGAME, which reads as a recovered blip
+    /// when it was nothing of the sort.
+    #[tokio::test]
+    async fn a_diverged_player_leaving_is_not_a_recovery() {
+        let mut actor = actor_with_players(3);
+        actor.check_loading_complete().await;
+
+        feed_turns(&mut actor, 0, 24);
+        actor.check_desync().await;
+        for p in actor.players.values_mut() {
+            p.checksums.push_back(turn_checksum(24));
+        }
+        actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999_9999;
+        actor.check_desync().await;
+        assert_eq!(actor.desynced, vec!["p2".to_string()]);
+
+        actor.remove_player(2, PLAYERLEAVE_LOST as u32).await;
+        assert!(
+            actor.desynced.is_empty(),
+            "the suspect list must drop a player who left, without claiming a recovery"
+        );
     }
 
     /// A genuine divergence is still caught: aligning the streams must not swallow a player
