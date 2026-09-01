@@ -39,17 +39,6 @@ pub const SYNC_TOLERANCE_MS: u32 = 5_000;
 pub const SYNC_WINDOW_MIN_MS: u32 = 500;
 pub const SYNC_WINDOW_MAX_MS: u32 = 30_000;
 
-/// The largest head start (in keepalives) that desync detection will absorb rather than report.
-///
-/// A GProxy++ client is fed empty actions locally and its W3 answers each of them with a
-/// keepalive that GProxy swallows, so the host's first keepalive from that client is already
-/// its view of a later turn than the same keepalive from a client connected directly. The
-/// offset is bounded by bot_reconnectwaittime (gproxy_empty_actions, capped at 9), so a dozen
-/// is comfortably above anything a well-behaved client can produce.
-pub const CHECKSUM_ALIGN_MAX_SKEW: usize = 12;
-/// Consecutive checksums that must match before an offset is accepted as the true alignment.
-/// One value matching is chance; four in a row is the same game state.
-pub const CHECKSUM_ALIGN_CONFIRM: usize = 4;
 /// How many times one game may report a change in who has diverged before the log goes quiet.
 /// A real desync reports once and stays put; this only bites on a game whose states flap.
 pub const DESYNC_REPORT_LIMIT: u32 = 10;
@@ -259,9 +248,6 @@ struct GameActor {
     desync_reports: u32,
     /// The last [`DESYNC_HISTORY`] checksums the game agreed on, newest last
     recent_checksums: std::collections::VecDeque<u32>,
-    /// The per-player checksum streams have been lined up on a common turn (see
-    /// [`Self::align_checksum_streams`]). No comparison happens until this is true.
-    checksums_aligned: bool,
     /// Participation records of players who left (written to db when the game ends)
     player_records: Vec<crate::db::GamePlayerRecord>,
     /// The time everyone finished loading (seconds; used to compute game duration)
@@ -335,7 +321,6 @@ impl GameActor {
             desync_started_turn: 0,
             desync_reports: 0,
             recent_checksums: Default::default(),
-            checksums_aligned: false,
             player_records: Vec::new(),
             loaded_time: 0,
             start_loading_ticks: 0,
@@ -1286,105 +1271,14 @@ impl GameActor {
         }
     }
 
-    /// Line the per-player checksum queues up on a common turn, once, before the first
-    /// comparison.
-    ///
-    /// Position N of each queue is only "the same turn for everybody" if every client starts
-    /// answering at the same turn, and a GProxy++ client does not: it is fed empty actions
-    /// locally and GProxy swallows the keepalives they produce, so the host's first checksum
-    /// from that client is already its view of a later turn than the first checksum from a
-    /// client connected directly. Comparing position 0 against position 0 then reports a
-    /// desync in the first second of every game with a mixed lobby, on games that go on to
-    /// play out perfectly normally for the next forty minutes.
-    ///
-    /// So: take the checksum sequence the largest group of players agrees on as the reference,
-    /// and for everyone else look for the small offset that makes their sequence match it.
-    /// A player who cannot be lined up at any offset is left alone - that is a real divergence
-    /// and the comparison below is meant to report it.
-    ///
-    /// Returns false while there is not yet enough queued to decide, so the caller waits.
-    fn align_checksum_streams(&mut self) -> bool {
-        let needed = CHECKSUM_ALIGN_MAX_SKEW + CHECKSUM_ALIGN_CONFIRM;
-        if self.players.is_empty()
-            || self.players.values().any(|p| p.checksums.len() < needed)
-        {
-            return false;
-        }
-        let sig = |p: &LobbyPlayer, off: usize| -> Vec<u32> {
-            p.checksums.iter().skip(off).take(CHECKSUM_ALIGN_CONFIRM).copied().collect()
-        };
-
-        // Every player votes, at every offset it could be starting from, for the sequence it
-        // would then report. The sequence the most players can reach is the turn they are all
-        // genuinely on, and each player's own offset is how far its stream had slipped.
-        //
-        // Voting over all offsets rather than trimming the odd ones out to fit a fixed
-        // reference is what makes this work in both directions. The first attempt pinned the
-        // reference to whatever the largest group reported at offset 0 and only ever trimmed
-        // the others, which cannot help when it is the *large* group that is a turn ahead -
-        // and that is exactly the case in the field, where the GProxy++ players are the
-        // majority and the ones carrying the extra leading checksum. It realigned nobody in a
-        // whole day of games.
-        let mut votes: std::collections::HashMap<Vec<u32>, std::collections::HashMap<u8, usize>> =
-            Default::default();
-        for p in self.players.values() {
-            for off in 0..=CHECKSUM_ALIGN_MAX_SKEW {
-                votes.entry(sig(p, off)).or_default().entry(p.pid).or_insert(off);
-            }
-        }
-        // Most players first; among ties the alignment that throws away the fewest turns
-        let best = votes.into_iter().max_by_key(|(_, per_player)| {
-            (
-                per_player.len(),
-                std::cmp::Reverse(per_player.values().sum::<usize>()),
-            )
-        });
-        let offsets = match best {
-            // Only trust an alignment a majority of the game agrees on. Anything less and the
-            // streams are not merely offset, which the comparison below is there to report.
-            Some((_, o)) if o.len() * 2 > self.players.len() => o,
-            _ => {
-                self.checksums_aligned = true;
-                return true;
-            }
-        };
-
-        let mut realigned: Vec<(String, usize)> = Vec::new();
-        for p in self.players.values_mut() {
-            match offsets.get(&p.pid) {
-                Some(&skew) if skew > 0 => {
-                    p.checksums.drain(..skew);
-                    realigned.push((p.name.clone(), skew));
-                }
-                _ => {}
-            }
-        }
-        if !realigned.is_empty() {
-            let who = realigned
-                .iter()
-                .map(|(name, skew)| format!("{name} (+{skew})"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            info!(
-                "[GAME: {}] checksum streams lined up, absorbed a head start from: {who}",
-                self.cfg.game_name
-            );
-        }
-        self.checksums_aligned = true;
-        true
-    }
-
     /// Desync detection: when every player has a checksum pending comparison, compare them one by one (mirrors C++ CheckSyncs)
     async fn check_desync(&mut self) {
-        if !self.checksums_aligned && !self.align_checksum_streams() {
-            return;
-        }
         while !self.players.is_empty()
             && self.players.values().all(|p| !p.checksums.is_empty())
         {
-            // Pop one checksum from every player: after align_checksum_streams position N of
-            // each queue is that player's view of the same turn, and popping in lockstep keeps
-            // it that way
+            // Pop one checksum from every player: they are queued in turn order and every
+            // client is handed the same action stream, so position N of each queue is that
+            // player's view of the same turn, and popping in lockstep keeps it that way
             let mut round: Vec<(u32, String, bool)> = Vec::with_capacity(self.players.len());
             for p in self.players.values_mut() {
                 round.push((p.checksums.pop_front().unwrap(), p.name.clone(), p.gproxy));
@@ -1706,6 +1600,42 @@ impl GameActor {
 
     /// Batch-send the queued actions (mirrors C++ SendAllActions: split into INCOMING_ACTION2 when >1452 bytes)
     async fn send_all_actions(&mut self) {
+        // Every client's W3 must be handed the exact same action stream, and a GProxy++ client
+        // is not being handed only what we send it: GProxy inserts gproxy_empty_actions empty
+        // actions of its own into the stream on every beat, as the reserve it feeds the client
+        // to keep it alive across a reconnect. So the host owes those same empty actions to
+        // everyone NOT behind GProxy++, or the two groups are running different streams.
+        // (Mirrors C++ SendAllActions, game_base.cpp:1327-1357.)
+        //
+        // Leaving them out is what put the "desync detected" line in the first second of every
+        // game with a mixed lobby, with the two reported states falling exactly along GProxy++
+        // usage - the detector was right and the bot was the one desyncing them.
+        let using_gproxy = self.players.values().any(|p| p.gproxy);
+        if using_gproxy {
+            let empty_n = self.cfg.gproxy_empty_actions;
+            let direct: Vec<u8> = self
+                .players
+                .values()
+                .filter(|p| !p.gproxy)
+                .map(|p| p.pid)
+                .collect();
+            for pid in direct {
+                for _ in 0..empty_n {
+                    let mut empty = std::collections::VecDeque::new();
+                    self.send_to_pid(pid, GameProtocol::send_w3gs_incoming_action(&mut empty, 0))
+                        .await;
+                }
+            }
+            // The replay is one more viewer of that same stream, so it gets them too
+            if let Some(rep) = &mut self.replay {
+                for _ in 0..empty_n {
+                    rep.add_time_slot(0, &[]);
+                }
+            }
+        }
+
+        // Not bumped for the empty actions: W3 does not answer them with a keepalive, so the
+        // players' counters do not move either (C++ has the same line commented out)
         self.sync_counter += 1;
 
         // Slice the queue into chunks by the 1452-byte cap (each subpacket item = 1(pid) + 2(len) + action bytes)
@@ -3448,53 +3378,9 @@ mod tests {
         // enough turns in perfect agreement for the comparison to actually run
         feed_turns(&mut actor, 0, 24);
         actor.check_desync().await;
-        assert!(actor.checksums_aligned, "agreeing streams must line up");
         assert!(
             !actor.desync_warned,
             "players agreeing on every turn must not be reported as desynced"
-        );
-    }
-
-    /// A client behind GProxy++ answers its first turns locally - GProxy feeds it empty actions
-    /// and swallows the keepalives - so the host's first checksum from that client is already a
-    /// later turn than the first checksum from a client connected directly. That head start is
-    /// an artefact of the proxy, not a divergence.
-    ///
-    /// Regression test: position 0 was compared against position 0 regardless, so every lobby
-    /// mixing GProxy++ and direct players reported a desync about one second after loading -
-    /// 17 games out of 17 in one day's logs, each one then playing out normally for the next
-    /// forty minutes, with the warning chat-spammed to everyone in the game.
-    #[tokio::test]
-    async fn gproxy_head_start_is_not_reported_as_a_desync() {
-        let mut actor = actor_with_players(3);
-        actor.check_loading_complete().await;
-
-        // pids 1 and 2 came through GProxy++ and are one turn ahead; pid 3 is connected directly
-        feed_turns(&mut actor, 1, 24);
-        let direct = actor.players.get_mut(&3).unwrap();
-        direct.checksums.clear();
-        for t in 0..24u32 {
-            direct.checksums.push_back(turn_checksum(t));
-        }
-
-        actor.check_desync().await;
-
-        assert!(actor.checksums_aligned, "the streams must be lined up");
-        assert!(
-            !actor.desync_warned,
-            "a proxy head start must not be reported as a desync"
-        );
-        // The head start was dropped rather than compared, so the direct player's 24 turns all
-        // got matched against turns 1..24 of the two proxied streams, whose turn 25 is still
-        // waiting for him
-        assert!(
-            actor.players[&3].checksums.is_empty(),
-            "the direct player's turns should all have been compared"
-        );
-        assert_eq!(
-            actor.players[&1].checksums.len(),
-            1,
-            "the proxied players should be exactly one turn ahead, not misaligned"
         );
     }
 
@@ -3567,6 +3453,85 @@ mod tests {
         );
     }
 
+    /// Every client's W3 must be handed the same action stream. A GProxy++ client inserts
+    /// gproxy_empty_actions empty actions of its own on every beat, so the host owes those same
+    /// empty actions to everyone not behind GProxy++.
+    ///
+    /// Regression test: the port dropped that block from C++ SendAllActions entirely, so any
+    /// lobby mixing GProxy++ and direct players ran two different streams from the first beat.
+    /// It showed up as "desync detected" one second into every such game with the two reported
+    /// game states falling exactly along GProxy++ usage - the detector was right and the bot
+    /// was the one desyncing them.
+    #[tokio::test]
+    async fn direct_players_get_the_empty_actions_gproxy_inserts_locally() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let mut actor = GameActor::new(make_cfg(Arc::new(GameMap::new())), event_tx, cmd_rx);
+        actor.cfg.gproxy_empty_actions = 2;
+        actor.game_loaded = true;
+
+        let (proxied_h, mut proxied_rx) = ConnHandle::new_undrained_for_test();
+        let (direct_h, mut direct_rx) = ConnHandle::new_undrained_for_test();
+        actor.players.insert(1, seated_player(1, "proxied", proxied_h, true));
+        actor.players.insert(2, seated_player(2, "direct", direct_h, false));
+
+        actor.send_all_actions().await;
+
+        fn count_actions(rx: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> usize {
+            let mut n = 0;
+            while let Ok(pkt) = rx.try_recv() {
+                if pkt.len() >= 2
+                    && pkt[0] == W3GS_HEADER_CONSTANT
+                    && pkt[1] == W3GS_INCOMING_ACTION
+                {
+                    n += 1;
+                }
+            }
+            n
+        }
+        assert_eq!(
+            count_actions(&mut proxied_rx),
+            1,
+            "a GProxy++ client gets only the real batch - GProxy inserts the empties itself"
+        );
+        assert_eq!(
+            count_actions(&mut direct_rx),
+            3,
+            "a direct client must get those same two empties plus the real batch"
+        );
+    }
+
+    /// With nobody on GProxy++ there is nothing to compensate for, and every client gets exactly
+    /// one action packet per beat.
+    #[tokio::test]
+    async fn an_all_direct_lobby_gets_no_empty_actions() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let mut actor = GameActor::new(make_cfg(Arc::new(GameMap::new())), event_tx, cmd_rx);
+        actor.cfg.gproxy_empty_actions = 2;
+        actor.game_loaded = true;
+
+        let (a, mut a_rx) = ConnHandle::new_undrained_for_test();
+        let (b, mut b_rx) = ConnHandle::new_undrained_for_test();
+        actor.players.insert(1, seated_player(1, "a", a, false));
+        actor.players.insert(2, seated_player(2, "b", b, false));
+
+        actor.send_all_actions().await;
+
+        for rx in [&mut a_rx, &mut b_rx] {
+            let mut n = 0;
+            while let Ok(pkt) = rx.try_recv() {
+                if pkt.len() >= 2
+                    && pkt[0] == W3GS_HEADER_CONSTANT
+                    && pkt[1] == W3GS_INCOMING_ACTION
+                {
+                    n += 1;
+                }
+            }
+            assert_eq!(n, 1, "one action packet per beat when no one is on GProxy++");
+        }
+    }
+
     /// A player quitting mid-order must not leave their actions behind in the queue: the batch
     /// that goes out on the next beat would then carry a PID every client has already torn down.
     ///
@@ -3626,37 +3591,6 @@ mod tests {
         assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
     }
 
-    /// The head start can just as easily be on the *majority*: it is the GProxy++ players who
-    /// carry the extra leading checksum, and in a normal lobby they outnumber everyone else.
-    ///
-    /// Regression test: the first attempt pinned the reference to whatever the largest group
-    /// reported at offset 0 and only ever trimmed the others, so it could only absorb a skew
-    /// pointing one way. In production it realigned nobody at all - a whole day of games still
-    /// reported "desync detected! turn 1" with the split falling exactly on GProxy++ usage.
-    #[tokio::test]
-    async fn a_head_start_on_the_majority_is_absorbed_too() {
-        let mut actor = actor_with_players(3);
-        actor.check_loading_complete().await;
-
-        feed_turns(&mut actor, 0, 24);
-        // pids 1 and 2 are behind GProxy++ and report one turn nobody else ever sees
-        for pid in [1u8, 2] {
-            actor.players.get_mut(&pid).unwrap().checksums.push_front(0xFEED_FACE);
-        }
-
-        actor.check_desync().await;
-
-        assert!(actor.checksums_aligned, "the streams must be lined up");
-        assert!(
-            !actor.desync_warned,
-            "a head start on the majority must not be reported as a desync"
-        );
-        assert!(
-            actor.players.values().all(|p| p.checksums.is_empty()),
-            "with the extra turn dropped all three streams line up exactly"
-        );
-    }
-
     /// A diverged player quitting is not the game agreeing again.
     ///
     /// Regression test: the log announced "game states agree again, X had diverged for 7
@@ -3693,7 +3627,7 @@ mod tests {
         // everyone agrees long enough to line up, then pid 2 goes its own way
         feed_turns(&mut actor, 0, 24);
         actor.check_desync().await;
-        assert!(actor.checksums_aligned && !actor.desync_warned);
+        assert!(!actor.desync_warned);
 
         for p in actor.players.values_mut() {
             p.checksums.push_back(turn_checksum(24));
