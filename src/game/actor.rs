@@ -1321,12 +1321,12 @@ impl GameActor {
             // (game_base.cpp:2828-2921). We cannot know which state is the correct one, so the
             // players vote with their checksums and the largest group is taken to be the real
             // game.
-            let mut bins: std::collections::HashMap<u32, Vec<(u8, String, bool)>> =
+            let mut bins: std::collections::HashMap<u32, Vec<DesyncBinMember>> =
                 Default::default();
             for (checksum, pid, name, gproxy) in round {
                 bins.entry(checksum).or_default().push((pid, name, gproxy));
             }
-            let mut groups: Vec<(u32, Vec<(u8, String, bool)>)> = bins.into_iter().collect();
+            let mut groups: Vec<(u32, Vec<DesyncBinMember>)> = bins.into_iter().collect();
             groups.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
 
             // Everyone outside the largest group (recorded for the log; remove_player clears
@@ -3142,6 +3142,9 @@ impl GameActor {
         .await;
     }
 }
+
+/// One player's entry in a desync bin: (pid, name, on GProxy++)
+type DesyncBinMember = (u8, String, bool);
 
 /// Whether the lag screen has been up long enough that the laggers are dropped for good:
 /// 60 seconds, or (empty_actions+1)*60 when anyone is on GProxy++ so a reconnect has room to
