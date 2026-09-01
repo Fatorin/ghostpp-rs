@@ -234,6 +234,9 @@ struct GameActor {
     lagging: bool,
     /// The ticks of the last lag screen resend (the W3 lag screen auto-dismisses after ~65s, so it is re-shown every 60s)
     last_lag_screen_reset: u64,
+    /// The second-clock when the current lag screen opened (mirrors C++ m_StartedLaggingTime;
+    /// the automatic lagger drop counts its wait from here)
+    started_lagging_time: u64,
     /// Already told the players about a desync (the chat message is sent once per game)
     desync_warned: bool,
     /// Comparison rounds completed = the turn currently being compared. Reported with a desync
@@ -315,6 +318,7 @@ impl GameActor {
             sync_counter: 0,
             lagging: false,
             last_lag_screen_reset: 0,
+            started_lagging_time: 0,
             desync_warned: false,
             checksum_turn: 0,
             desynced: Vec::new(),
@@ -875,7 +879,8 @@ impl GameActor {
             // ---- in-game ----
             "drop" => {
                 if self.game_loaded && self.lagging {
-                    self.stop_laggers("drop_laggers").await;
+                    let msg = crate::lang::t("drop_laggers", &[]);
+                    self.stop_laggers(&msg).await;
                 } else {
                     self.reply_to(req_pid, &crate::lang::t("drop_none", &[])).await;
                 }
@@ -1271,7 +1276,11 @@ impl GameActor {
         }
     }
 
-    /// Desync detection: when every player has a checksum pending comparison, compare them one by one (mirrors C++ CheckSyncs)
+    /// Desync detection (mirrors C++ EventPlayerKeepAlive, game_base.cpp:2784-2921): when
+    /// every player has a checksum pending comparison, compare them in lockstep. On a mismatch
+    /// the players have, in effect, voted with their checksums: the minority game state is
+    /// dropped from the game and the majority plays on; a tie between the largest states drops
+    /// everyone, since there is no fair way to pick a survivor.
     async fn check_desync(&mut self) {
         while !self.players.is_empty()
             && self.players.values().all(|p| !p.checksums.is_empty())
@@ -1279,15 +1288,15 @@ impl GameActor {
             // Pop one checksum from every player: they are queued in turn order and every
             // client is handed the same action stream, so position N of each queue is that
             // player's view of the same turn, and popping in lockstep keeps it that way
-            let mut round: Vec<(u32, String, bool)> = Vec::with_capacity(self.players.len());
+            let mut round: Vec<(u32, u8, String, bool)> = Vec::with_capacity(self.players.len());
             for p in self.players.values_mut() {
-                round.push((p.checksums.pop_front().unwrap(), p.name.clone(), p.gproxy));
+                round.push((p.checksums.pop_front().unwrap(), p.pid, p.name.clone(), p.gproxy));
             }
             self.checksum_turn += 1;
             let turn = self.checksum_turn;
 
             let first = round[0].0;
-            if round.iter().all(|(c, _, _)| *c == first) {
+            if round.iter().all(|(c, _, _, _)| *c == first) {
                 self.recent_checksums.push_back(first);
                 while self.recent_checksums.len() > DESYNC_HISTORY {
                     self.recent_checksums.pop_front();
@@ -1309,76 +1318,106 @@ impl GameActor {
             }
 
             // Group the players by the game state they reported, mirroring the C++ bins
-            // (game_base.cpp:2830-2870). A lone outlier against a large agreeing group is a real
-            // desync; everyone reporting something different means the comparison itself is
-            // misaligned, and this line is what tells the two apart in a bug report.
-            let mut bins: std::collections::HashMap<u32, Vec<(String, bool)>> = Default::default();
-            for (checksum, name, gproxy) in round {
-                bins.entry(checksum).or_default().push((name, gproxy));
+            // (game_base.cpp:2828-2921). We cannot know which state is the correct one, so the
+            // players vote with their checksums and the largest group is taken to be the real
+            // game.
+            let mut bins: std::collections::HashMap<u32, Vec<(u8, String, bool)>> =
+                Default::default();
+            for (checksum, pid, name, gproxy) in round {
+                bins.entry(checksum).or_default().push((pid, name, gproxy));
             }
-            let mut groups: Vec<(u32, Vec<(String, bool)>)> = bins.into_iter().collect();
-            // Largest group first, and among equal-sized groups the one that is not already
-            // the suspect. Without that tie-break a two-way split - which is what the last
-            // seconds of a game look like once everyone starts quitting - hands the "majority"
-            // to whichever group the sort happened to put first and blames the other, flipping
-            // every turn and filling the log with contradictory lines.
-            let suspects = &self.desynced;
-            groups.sort_by_key(|(_, members)| {
-                let all_suspect = members.iter().all(|(name, _)| suspects.contains(name));
-                (std::cmp::Reverse(members.len()), all_suspect)
-            });
+            let mut groups: Vec<(u32, Vec<(u8, String, bool)>)> = bins.into_iter().collect();
+            groups.sort_by_key(|(_, members)| std::cmp::Reverse(members.len()));
 
-            // Everyone outside the largest group - the players to look at in the replay
+            // Everyone outside the largest group (recorded for the log; remove_player clears
+            // each name again as the kicks below go through)
             let mut diverged: Vec<String> = groups
                 .iter()
                 .skip(1)
-                .flat_map(|(_, members)| members.iter().map(|(name, _)| name.clone()))
+                .flat_map(|(_, members)| members.iter().map(|(_, name, _)| name.clone()))
                 .collect();
             diverged.sort();
+            self.desynced = diverged;
+            self.desync_started_turn = turn;
 
-            // Only report when the picture changes: a real desync holds the same set of players
-            // for the rest of the game and would otherwise log on every single turn
-            if diverged != self.desynced {
-                self.desynced = diverged;
-                self.desync_started_turn = turn;
-                if self.note_desync_change() {
-                    let summary = groups
-                        .iter()
-                        .map(|(checksum, members)| {
-                            let who = members
-                                .iter()
-                                .map(|(name, gproxy)| {
-                                    format!("{name}{}", if *gproxy { " (GProxy)" } else { "" })
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            // Is this the state the rest of the game was in a few turns ago? If
-                            // so their stream slipped a turn and the game itself is fine; if the
-                            // value matches no recent turn, the game state really has parted
-                            // company. That is the one thing the log could never tell before.
-                            let age = self
-                                .recent_checksums
-                                .iter()
-                                .rev()
-                                .position(|c| c == checksum)
-                                .map(|back| format!(" [= turn {}]", turn - 1 - back as u32))
-                                .unwrap_or_else(|| " [matches no recent turn]".to_string());
-                            format!("{checksum:08X}{age}: {who}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    let secs = crate::util::get_time().saturating_sub(self.loaded_time);
-                    warn!(
-                        "[GAME: {}] desync detected! turn {turn}, {secs}s into the game - {summary}",
-                        self.cfg.game_name
-                    );
-                }
+            if self.note_desync_change() {
+                let summary = groups
+                    .iter()
+                    .map(|(checksum, members)| {
+                        let who = members
+                            .iter()
+                            .map(|(_, name, gproxy)| {
+                                format!("{name}{}", if *gproxy { " (GProxy)" } else { "" })
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        // Is this the state the rest of the game was in a few turns ago? If so
+                        // their stream slipped a turn; a value matching no recent turn is a
+                        // game state that really has parted company.
+                        let age = self
+                            .recent_checksums
+                            .iter()
+                            .rev()
+                            .position(|c| c == checksum)
+                            .map(|back| format!(" [= turn {}]", turn - 1 - back as u32))
+                            .unwrap_or_else(|| " [matches no recent turn]".to_string());
+                        format!("{checksum:08X}{age}: {who}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let secs = crate::util::get_time().saturating_sub(self.loaded_time);
+                warn!(
+                    "[GAME: {}] desync detected! turn {turn}, {secs}s into the game - {summary}",
+                    self.cfg.game_name
+                );
             }
 
-            // The players are told once; after that it is the log's job
-            if !self.desync_warned {
-                self.desync_warned = true;
-                self.send_all_chat(&crate::lang::t("desync_detected", &[])).await;
+            // Tell the players, including who is in which game state (mirrors the C++
+            // DesyncDetected + PlayersInGameState chat)
+            self.desync_warned = true;
+            self.send_all_chat(&crate::lang::t("desync_detected", &[])).await;
+            for (number, (_, members)) in groups.iter().enumerate() {
+                let names = members
+                    .iter()
+                    .map(|(_, name, _)| name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.send_all_chat(&crate::lang::t(
+                    "desync_state_group",
+                    &[("number", &(number + 1).to_string()), ("names", &names)],
+                ))
+                .await;
+            }
+
+            // The game cannot continue split across two states, so the minority is dropped and
+            // the majority plays on (mirrors C++ EventPlayerKeepAlive, game_base.cpp:2874-2907;
+            // the port used to only warn, which left the game half-broken and every player
+            // seeing a different match). When the top groups are the same size there is no fair
+            // way to pick a survivor - most commonly a desynced 1v1 - so everyone is dropped,
+            // exactly as C++ does.
+            let tied = groups.len() > 1 && groups[0].1.len() == groups[1].1.len();
+            let victims: Vec<u8> = if tied {
+                self.send_all_chat(&crate::lang::t("desync_tie", &[])).await;
+                self.players.keys().copied().collect()
+            } else {
+                let names: Vec<String> = groups
+                    .iter()
+                    .skip(1)
+                    .flat_map(|(_, members)| members.iter().map(|(_, name, _)| name.clone()))
+                    .collect();
+                self.send_all_chat(&crate::lang::t(
+                    "desync_dropped",
+                    &[("names", &names.join(", "))],
+                ))
+                .await;
+                groups
+                    .iter()
+                    .skip(1)
+                    .flat_map(|(_, members)| members.iter().map(|(pid, _, _)| *pid))
+                    .collect()
+            };
+            for pid in victims {
+                self.remove_player(pid, PLAYERLEAVE_LOST as u32).await;
             }
         }
     }
@@ -1439,6 +1478,7 @@ impl GameActor {
             if !laggers.is_empty() {
                 self.lagging = true;
                 self.last_lag_screen_reset = now;
+                self.started_lagging_time = crate::util::get_time();
                 for (pid, _) in &laggers {
                     if let Some(p) = self.players.get_mut(pid) {
                         p.lagging = true;
@@ -1458,13 +1498,39 @@ impl GameActor {
             }
         } else {
             let now = get_ticks();
-            // Clear caught-up players one by one (mirrors C++: cleared once the sync difference < sync_limit)
+
+            // Laggers get one full wait to come back, then they are dropped for good (mirrors
+            // C++ game_base.cpp:905-919). Without this a lagger who never recovers but never
+            // closes their socket parks the whole game on the lag screen until an admin types
+            // !drop - the 30s recv timeout only catches the ones who go completely silent.
+            let using_gproxy = self.players.values().any(|p| p.gproxy);
+            if lag_screen_expired(
+                self.started_lagging_time,
+                crate::util::get_time(),
+                using_gproxy,
+                self.cfg.gproxy_empty_actions,
+            ) {
+                let wait = if using_gproxy {
+                    (self.cfg.gproxy_empty_actions as u64 + 1) * 60
+                } else {
+                    60
+                };
+                let msg = crate::lang::t("drop_auto", &[("seconds", &wait.to_string())]);
+                self.stop_laggers(&msg).await;
+            }
+
+            // Clear caught-up players one by one. C++ clears at HALF the start threshold
+            // (game_base.cpp:985, < m_SyncLimit / 2): the gap between "starts lagging at
+            // sync_limit behind" and "recovers at sync_limit/2 behind" is hysteresis, so a
+            // player hovering right at the edge does not flip the lag screen on and off
+            // every beat.
+            let recover_limit = (sync_limit / 2).max(1);
             let recovered: Vec<(u8, u32)> = self
                 .players
                 .values()
                 .filter(|p| {
                     p.lagging
-                        && self.sync_counter.saturating_sub(p.sync_counter) < sync_limit
+                        && self.sync_counter.saturating_sub(p.sync_counter) < recover_limit
                 })
                 .map(|p| (p.pid, (now - p.started_lagging_ticks) as u32))
                 .collect();
@@ -1544,8 +1610,8 @@ impl GameActor {
     }
 
     /// Remove everyone currently on the lag screen (mirrors C++ StopLaggers).
-    /// `reason_key` is the lang key of the message announced to the game afterwards.
-    async fn stop_laggers(&mut self, reason_key: &str) {
+    /// `message` is announced to the game afterwards.
+    async fn stop_laggers(&mut self, message: &str) {
         let laggers: Vec<u8> =
             self.players.values().filter(|p| p.lagging).map(|p| p.pid).collect();
         if laggers.is_empty() {
@@ -1560,14 +1626,14 @@ impl GameActor {
         if !self.players.values().any(|p| p.lagging) {
             self.lagging = false;
         }
-        self.send_all_chat(&crate::lang::t(reason_key, &[])).await;
+        self.send_all_chat(message).await;
     }
 
     /// The lag screen's "Drop Players" button (W3GS_DROPREQ). Without this the button is inert,
     /// which is what leaves a game stuck behind a player whose connection has died but whose
     /// socket has not closed. W3 only enables the button once the lag screen has been up for
     /// ~45 seconds, so that wait is already enforced client-side.
-    /// Drops the laggers once more than half the players have voted (mirrors C++
+    /// Drops the laggers once at least half the players have voted (mirrors C++
     /// EventPlayerDropRequest).
     async fn handle_drop_request(&mut self, pid: u8) {
         if !self.lagging {
@@ -1592,9 +1658,11 @@ impl GameActor {
             &[("name", &name), ("votes", &votes.to_string()), ("total", &total.to_string())],
         ))
         .await;
-        // Strictly more than half, matching C++ ((float)Votes / m_Players.size( ) > 0.50f)
-        if votes * 2 > total {
-            self.stop_laggers("drop_by_vote").await;
+        // At least half of the players: C++ passes on Votes / size > 0.49, so exactly half
+        // is enough (2 of 4 drops; the earlier port required a strict majority and was wrong)
+        if votes * 2 >= total {
+            let msg = crate::lang::t("drop_by_vote", &[]);
+            self.stop_laggers(&msg).await;
         }
     }
 
@@ -3075,6 +3143,14 @@ impl GameActor {
     }
 }
 
+/// Whether the lag screen has been up long enough that the laggers are dropped for good:
+/// 60 seconds, or (empty_actions+1)*60 when anyone is on GProxy++ so a reconnect has room to
+/// happen (mirrors C++ game_base.cpp:905-919).
+fn lag_screen_expired(started_secs: u64, now_secs: u64, using_gproxy: bool, empty_actions: u8) -> bool {
+    let wait = if using_gproxy { (empty_actions as u64 + 1) * 60 } else { 60 };
+    now_secs.saturating_sub(started_secs) >= wait
+}
+
 /// Leave code → human-readable text (mirrors the leftreason style of C++ language.cfg)
 fn left_reason_text(left_code: u32) -> &'static str {
     match left_code as u8 {
@@ -3384,42 +3460,38 @@ mod tests {
         );
     }
 
-    /// A divergence that recovers on the next turn is a blip; one that holds is real. Telling
-    /// them apart in the log means tracking who is currently diverged, rather than latching a
-    /// single "already warned" flag and going silent for the rest of the game.
+    /// When the largest game states are the same size there is no fair way to pick a survivor
+    /// - most commonly a desynced 1v1 - so everyone is dropped, exactly as C++ does
+    /// (game_base.cpp:2874-2886).
     #[tokio::test]
-    async fn a_transient_divergence_is_tracked_and_cleared() {
+    async fn a_desync_with_no_majority_drops_everyone() {
         let mut actor = actor_with_players(3);
         actor.check_loading_complete().await;
 
         feed_turns(&mut actor, 0, 24);
         actor.check_desync().await;
-        assert!(
-            actor.desynced.is_empty(),
-            "an agreeing stretch must record no divergence"
-        );
 
-        // one turn where pid 2 sees something else
-        for p in actor.players.values_mut() {
-            p.checksums.push_back(turn_checksum(24));
+        // three players, three different game states - no majority to keep
+        for (i, p) in actor.players.values_mut().enumerate() {
+            p.checksums.push_back(0x1000_0000 + i as u32);
         }
-        actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999_9999;
         actor.check_desync().await;
-        assert_eq!(
-            actor.desynced,
-            vec!["p2".to_string()],
-            "the odd player out must be recorded by name"
-        );
-        let started = actor.desync_started_turn;
 
-        // ...and everyone agrees again
-        feed_turns(&mut actor, 25, 3);
-        actor.check_desync().await;
-        assert!(actor.desynced.is_empty(), "a recovered blip must clear");
+        assert!(actor.desync_warned);
         assert!(
-            actor.checksum_turn > started,
-            "the turn counter must keep advancing so a desync can be located in the replay"
+            actor.players.is_empty(),
+            "with no majority state every player must be dropped"
         );
+    }
+
+    /// The automatic lagger drop waits 60s, or (empty_actions+1)*60s when GProxy++ is in play
+    /// so a reconnect has room to happen (mirrors C++ game_base.cpp:915-916).
+    #[test]
+    fn lag_screen_expiry_matches_the_cpp_waits() {
+        assert!(!lag_screen_expired(100, 159, false, 2));
+        assert!(lag_screen_expired(100, 160, false, 2));
+        assert!(!lag_screen_expired(100, 279, true, 2));
+        assert!(lag_screen_expired(100, 280, true, 2));
     }
 
     /// A divergence has to say whether the odd player out is reporting a state the rest of the
@@ -3446,10 +3518,13 @@ mod tests {
         }
         actor.players.get_mut(&2).unwrap().checksums[0] = turn_checksum(23);
         actor.check_desync().await;
-        assert_eq!(actor.desynced, vec!["p2".to_string()]);
         assert!(
             actor.recent_checksums.contains(&turn_checksum(23)),
             "the value pid 2 reported is a turn the game agreed on, and the log says so"
+        );
+        assert!(
+            !actor.players.contains_key(&2),
+            "the odd player out is still dropped - the log labels the drop, it does not excuse it"
         );
     }
 
@@ -3591,13 +3666,11 @@ mod tests {
         assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
     }
 
-    /// A diverged player quitting is not the game agreeing again.
-    ///
-    /// Regression test: the log announced "game states agree again, X had diverged for 7
-    /// turn(s)" three milliseconds after X sent LEAVEGAME, which reads as a recovered blip
-    /// when it was nothing of the sort.
+    /// After a desync kick the suspect bookkeeping must be clean: remove_player drops the
+    /// kicked player's name, so the next agreeing round does not announce a "recovery" that
+    /// never happened.
     #[tokio::test]
-    async fn a_diverged_player_leaving_is_not_a_recovery() {
+    async fn a_desync_kick_leaves_no_stale_suspects() {
         let mut actor = actor_with_players(3);
         actor.check_loading_complete().await;
 
@@ -3608,17 +3681,16 @@ mod tests {
         }
         actor.players.get_mut(&2).unwrap().checksums[0] = 0x9999_9999;
         actor.check_desync().await;
-        assert_eq!(actor.desynced, vec!["p2".to_string()]);
 
-        actor.remove_player(2, PLAYERLEAVE_LOST as u32).await;
+        assert!(!actor.players.contains_key(&2), "the minority state is dropped");
         assert!(
             actor.desynced.is_empty(),
-            "the suspect list must drop a player who left, without claiming a recovery"
+            "the kicked player must not linger as a suspect"
         );
     }
 
-    /// A genuine divergence is still caught: aligning the streams must not swallow a player
-    /// whose game state really has parted company with everyone else's.
+    /// A genuine divergence is caught, and handled the way C++ handles it: the minority game
+    /// state is dropped from the game and the majority plays on.
     #[tokio::test]
     async fn genuine_desync_is_still_detected() {
         let mut actor = actor_with_players(3);
@@ -3636,10 +3708,14 @@ mod tests {
         actor.check_desync().await;
 
         assert!(actor.desync_warned, "a diverging player must be reported");
+        assert!(
+            !actor.players.contains_key(&2),
+            "the minority game state is dropped (mirrors C++ kicking desynced players)"
+        );
+        assert_eq!(actor.players.len(), 2, "the majority plays on");
     }
 
-    /// A player whose stream cannot be lined up at any offset is a real divergence, not a proxy
-    /// head start, and must still be reported.
+    /// A player whose stream disagrees from the very first turn is caught immediately.
     #[tokio::test]
     async fn a_stream_that_never_matches_is_still_a_desync() {
         let mut actor = actor_with_players(3);
