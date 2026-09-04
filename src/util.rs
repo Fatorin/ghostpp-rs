@@ -53,6 +53,15 @@ pub fn get_ticks() -> u64 {
     start.elapsed().as_millis() as u64
 }
 
+/// Mirrors C++ UTIL_CreateByteArray(uint16_t): 2 bytes (map_width / map_height must be exactly 2)
+pub fn util_create_byte_array_u16(i: u16, reverse: bool) -> Vec<u8> {
+    let mut result = vec![(i & 0xFF) as u8, ((i >> 8) & 0xFF) as u8];
+    if reverse {
+        result.reverse();
+    }
+    result
+}
+
 pub fn util_create_byte_array(i: u32, reverse: bool) -> Vec<u8> {
     let mut result = vec![
         (i & 0xFF) as u8,

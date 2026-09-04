@@ -1117,9 +1117,11 @@ fn read_war3map_i(data: &Vec<u8>) -> io::Result<War3mapInfo> {
     // let's not confuse the user by displaying erroneous map options so zero them out now
     map_options = raw_map_flags & (MAPOPT_MELEE | MAPOPT_FIXEDPLAYERSETTINGS | MAPOPT_CUSTOMFORCES);
     info!("[MAP] calculated map_options = {}", map_options);
-    map_width = util_create_byte_array(raw_map_width, false);
+    // C++ casts to uint16_t here: check_valid() requires exactly 2 bytes, and the 4-byte form
+    // made every map loaded at runtime via !map (no map_width/map_height in its config) invalid
+    map_width = util_create_byte_array_u16(raw_map_width as u16, false);
     info!("[MAP] calculated map_width = {}", raw_map_width);
-    map_height = util_create_byte_array(raw_map_height, false);
+    map_height = util_create_byte_array_u16(raw_map_height as u16, false);
     info!("[MAP] calculated map_height = {}", raw_map_height);
     map_num_players = raw_map_num_players - closed_slots;
     info!("[MAP] calculated map_numplayers = {}", map_num_players);
