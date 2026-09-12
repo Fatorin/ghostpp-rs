@@ -275,7 +275,16 @@ struct GameActor {
     /// Pids whose write queue overflowed, handled by process_pending_drops after the current
     /// event so the send path never re-enters itself
     pending_drop: Vec<u8>,
+    /// The second-clock when the game was left with a single player (0 = not running). Mirrors
+    /// C++ m_GameOverTime: [`GAME_OVER_WAIT_SECS`] later the last player is disconnected so the
+    /// game closes instead of lingering on one player - the winner still sitting at the score
+    /// screen, or a GProxy++ player being held for a reconnect nobody else is waiting for.
+    game_over_time: u64,
 }
+
+/// How long a game is allowed to run with a single player left before it is closed
+/// (mirrors the 60 seconds of C++ game_base.cpp "gameover timer finished")
+const GAME_OVER_WAIT_SECS: u64 = 60;
 
 impl GameActor {
     fn new(
@@ -336,6 +345,7 @@ impl GameActor {
             held_names: Vec::new(),
             hcl_string,
             pending_drop: Vec::new(),
+            game_over_time: 0,
         }
     }
 
@@ -417,6 +427,7 @@ impl GameActor {
                     }
                 }
                 _ = slot_info_tick.tick() => {
+                    self.check_game_over(crate::util::get_time()).await;
                     if self.slot_info_changed && !self.started {
                         self.slot_info_changed = false;
                         self.send_all_slot_info().await;
@@ -658,6 +669,16 @@ impl GameActor {
             }
             GameCommand::AdminCommand { requester, command, payload } => {
                 self.handle_admin_command(&requester, &command, &payload).await
+            }
+            GameCommand::AdminDropLaggers { requester } => {
+                // The vote may already have passed by the time BotCore answers, in which case
+                // there is nothing left to do and nothing worth saying
+                if self.game_loaded && self.lagging {
+                    info!("[GAME: {}] admin [{requester}] dropped the laggers from the lag screen", self.cfg.game_name);
+                    let msg = crate::lang::t("drop_by_admin", &[("name", &requester)]);
+                    self.stop_laggers(&msg).await;
+                }
+                true
             }
             GameCommand::Close => false,
         }
@@ -1618,7 +1639,8 @@ impl GameActor {
             return;
         }
         for pid in laggers {
-            self.remove_player(pid, PLAYERLEAVE_DISCONNECT as u32).await;
+            self.remove_player_with_reason(pid, PLAYERLEAVE_DISCONNECT as u32, Some(message))
+                .await;
         }
         // Close the lag screen right here instead of waiting for the next beat to notice, so
         // the action loop resumes immediately - the clients drop the laggers off their own lag
@@ -1633,22 +1655,31 @@ impl GameActor {
     /// which is what leaves a game stuck behind a player whose connection has died but whose
     /// socket has not closed. W3 only enables the button once the lag screen has been up for
     /// ~45 seconds, so that wait is already enforced client-side.
-    /// Drops the laggers once at least half the players have voted (mirrors C++
-    /// EventPlayerDropRequest).
+    ///
+    /// Drops the laggers once at least half the players who can still press the button have
+    /// voted (C++ EventPlayerDropRequest counts the laggers themselves in the denominator, which
+    /// made the button useless in a small game: with one of three players disconnected the two
+    /// remaining had to both vote, and a GProxy++ player being held for a reconnect can never
+    /// vote at all). The press is also reported to BotCore, which lets an admin drop alone.
     async fn handle_drop_request(&mut self, pid: u8) {
         if !self.lagging {
+            debug!("[GAME: {}] pid={pid} sent DROPREQ with no lag screen up, ignoring", self.cfg.game_name);
             return;
         }
         // One vote per player per lag screen; votes are cleared when the next screen opens
-        let name = match self.players.get_mut(&pid) {
+        let (name, spoofed, spoofed_realm) = match self.players.get_mut(&pid) {
             Some(p) if !p.drop_vote => {
                 p.drop_vote = true;
-                p.name.clone()
+                (p.name.clone(), p.spoofed, p.spoofed_realm.clone())
             }
-            _ => return,
+            Some(p) => {
+                debug!("[GAME: {}] [{}] pressed drop again, already counted", self.cfg.game_name, p.name);
+                return;
+            }
+            None => return,
         };
-        let votes = self.players.values().filter(|p| p.drop_vote).count();
-        let total = self.players.len();
+        let votes = self.players.values().filter(|p| p.drop_vote && !p.lagging).count();
+        let total = self.players.values().filter(|p| !p.lagging).count();
         info!(
             "[GAME: {}] [{name}] voted to drop the laggers ({votes}/{total})",
             self.cfg.game_name
@@ -1658,11 +1689,52 @@ impl GameActor {
             &[("name", &name), ("votes", &votes.to_string()), ("total", &total.to_string())],
         ))
         .await;
-        // At least half of the players: C++ passes on Votes / size > 0.49, so exactly half
-        // is enough (2 of 4 drops; the earlier port required a strict majority and was wrong)
+        // At least half of the voters: C++ passes on Votes / size > 0.49, so exactly half is
+        // enough (2 of 4 drops; the earlier port required a strict majority and was wrong)
         if votes * 2 >= total {
             let msg = crate::lang::t("drop_by_vote", &[]);
             self.stop_laggers(&msg).await;
+            return;
+        }
+        // Not enough votes yet - let BotCore decide whether this player may drop alone
+        let _ = self
+            .event_tx
+            .send(BotEvent::Game {
+                host_counter: self.cfg.host_counter,
+                event: GameEvent::DropRequest { name, spoofed, spoofed_realm },
+            })
+            .await;
+    }
+
+    /// The gameover timer (mirrors C++ CBaseGame::Update, game_base.cpp:1071-1097): once a
+    /// started game is down to one player the clock starts, and [`GAME_OVER_WAIT_SECS`] later
+    /// that player is disconnected so the game closes. Without it a game lingered for as long
+    /// as its last player did - most visibly a GProxy++ player already gone from the game but
+    /// held for the full reconnect wait after everyone else had left, which kept the game (and
+    /// its player) listed as still running.
+    async fn check_game_over(&mut self, now_secs: u64) {
+        if !(self.game_loading || self.game_loaded) {
+            return;
+        }
+        if self.players.len() == 1 && self.game_over_time == 0 {
+            info!("[GAME: {}] gameover timer started (one player left)", self.cfg.game_name);
+            self.game_over_time = now_secs;
+        }
+        if self.game_over_time != 0
+            && now_secs.saturating_sub(self.game_over_time) >= GAME_OVER_WAIT_SECS
+            && !self.players.is_empty()
+        {
+            info!("[GAME: {}] is over (gameover timer finished)", self.cfg.game_name);
+            self.send_all_chat(&crate::lang::t("gameover_timer_finished", &[])).await;
+            self.stop_players("was disconnected (gameover timer finished)").await;
+        }
+    }
+
+    /// Disconnect every remaining player with the given left reason (mirrors C++ StopPlayers)
+    async fn stop_players(&mut self, reason: &str) {
+        let pids: Vec<u8> = self.players.keys().copied().collect();
+        for pid in pids {
+            self.remove_player_with_reason(pid, PLAYERLEAVE_LOST as u32, Some(reason)).await;
         }
     }
 
@@ -2718,6 +2790,12 @@ impl GameActor {
 
     /// Remove a player (leave / disconnect), free the slot and notify the whole game
     async fn remove_player(&mut self, pid: u8, left_code: u32) {
+        self.remove_player_with_reason(pid, left_code, None).await;
+    }
+
+    /// [`remove_player`] with an explicit left reason for the game record, where the leave code
+    /// alone does not say why (dropped by vote, gameover timer). None = derived from the code.
+    async fn remove_player_with_reason(&mut self, pid: u8, left_code: u32, reason: Option<&str>) {
         let player = match self.players.remove(&pid) {
             Some(p) => p,
             None => return,
@@ -2783,7 +2861,9 @@ impl GameActor {
             } else {
                 0
             },
-            left_reason: left_reason_text(left_code).to_string(),
+            left_reason: reason
+                .map(str::to_string)
+                .unwrap_or_else(|| left_reason_text(left_code).to_string()),
             left_code,
             team,
             colour,
@@ -3641,32 +3721,120 @@ mod tests {
     }
 
     /// The lag screen's "Drop Players" button (W3GS_DROPREQ) has to actually drop the lagger
-    /// once more than half the players have pressed it.
+    /// once at least half the players who can press it have done so.
     ///
     /// Regression test: the packet was not handled at all, so the button did nothing and a game
     /// stuck behind a player whose connection had died - but whose socket was still open, so
-    /// the actor never saw a close - could only be rescued by an admin typing !drop.
+    /// the actor never saw a close - could only be rescued by an admin typing !drop. The first
+    /// fix then counted the lagger in the denominator, so with four players and one dropped
+    /// connection two of the other three had to vote - and the held player never could.
     #[tokio::test]
-    async fn drop_request_drops_the_lagger_once_a_majority_votes() {
+    async fn drop_request_drops_the_lagger_once_half_the_voters_agree() {
+        let mut actor = actor_with_players(4);
+        actor.check_loading_complete().await;
+        actor.lagging = true;
+        actor.players.get_mut(&4).unwrap().lagging = true;
+
+        actor.handle_drop_request(1).await;
+        assert!(actor.players.contains_key(&4), "1 of 3 voters is not enough");
+        actor.handle_drop_request(1).await;
+        assert!(
+            actor.players.contains_key(&4),
+            "pressing the button twice must not count twice"
+        );
+
+        actor.handle_drop_request(2).await;
+        assert!(
+            !actor.players.contains_key(&4),
+            "2 of 3 voters must drop the lagger - the lagger does not count"
+        );
+        assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
+        let record = actor.player_records.last().expect("the drop is recorded");
+        assert_eq!(record.left_reason, crate::lang::t("drop_by_vote", &[]));
+    }
+
+    /// With one of three players disconnected, the remaining pair must not both have to vote:
+    /// one press is half of the two who can press.
+    #[tokio::test]
+    async fn drop_request_from_one_of_two_remaining_players_is_enough() {
         let mut actor = actor_with_players(3);
         actor.check_loading_complete().await;
         actor.lagging = true;
         actor.players.get_mut(&3).unwrap().lagging = true;
 
         actor.handle_drop_request(1).await;
-        assert!(actor.players.contains_key(&3), "1 of 3 votes is not a majority");
-        actor.handle_drop_request(1).await;
-        assert!(
-            actor.players.contains_key(&3),
-            "pressing the button twice must not count twice"
-        );
+        assert!(!actor.players.contains_key(&3), "1 of 2 voters drops the lagger");
+    }
 
-        actor.handle_drop_request(2).await;
-        assert!(
-            !actor.players.contains_key(&3),
-            "2 of 3 votes must drop the lagger"
-        );
-        assert!(!actor.lagging, "the lag screen closes once the lagger is gone");
+    /// An admin's press is answered by BotCore with AdminDropLaggers, which drops without a vote
+    #[tokio::test]
+    async fn admin_drop_request_drops_the_laggers_without_a_vote() {
+        let mut actor = actor_with_players(5);
+        actor.check_loading_complete().await;
+        actor.lagging = true;
+        actor.players.get_mut(&5).unwrap().lagging = true;
+
+        actor.handle_drop_request(1).await;
+        assert!(actor.players.contains_key(&5), "1 of 4 voters is not enough");
+        actor
+            .handle_command(GameCommand::AdminDropLaggers { requester: "p1".into() })
+            .await;
+        assert!(!actor.players.contains_key(&5), "an admin drops the lagger alone");
+        assert!(!actor.lagging);
+    }
+
+    /// The gameover timer (C++ parity): a started game left with a single player closes 60s
+    /// later instead of running for as long as that player - or their reconnect hold - lasts.
+    #[tokio::test]
+    async fn gameover_timer_disconnects_the_last_player_after_a_minute() {
+        let mut actor = actor_with_players(2);
+        actor.check_loading_complete().await;
+        assert!(actor.game_loaded);
+
+        actor.check_game_over(1000).await;
+        assert_eq!(actor.game_over_time, 0, "two players: no timer");
+
+        actor.remove_player(2, PLAYERLEAVE_LOST as u32).await;
+        actor.check_game_over(1000).await;
+        assert_eq!(actor.game_over_time, 1000, "one player left: the timer starts");
+
+        actor.check_game_over(1000 + GAME_OVER_WAIT_SECS - 1).await;
+        assert!(actor.players.contains_key(&1), "still within the wait");
+
+        actor.check_game_over(1000 + GAME_OVER_WAIT_SECS).await;
+        assert!(actor.players.is_empty(), "the last player is disconnected when the timer expires");
+        let record = actor.player_records.last().unwrap();
+        assert_eq!(record.left_code, PLAYERLEAVE_LOST as u32);
+        assert_eq!(record.left_reason, "was disconnected (gameover timer finished)");
+    }
+
+    /// A player being held for a GProxy++ reconnect still counts as the one player left: the
+    /// hold must not keep a game everyone else has left alive for the whole reconnect wait
+    #[tokio::test]
+    async fn gameover_timer_runs_while_the_last_player_is_held_for_reconnect() {
+        let mut actor = actor_with_players(2);
+        actor.check_loading_complete().await;
+        actor.remove_player(1, PLAYERLEAVE_LOST as u32).await;
+        {
+            let p = actor.players.get_mut(&2).unwrap();
+            p.gproxy = true;
+            p.gproxy_disconnected = true;
+            p.disconnect_time = 1000;
+        }
+        actor.check_game_over(1000).await;
+        actor.check_game_over(1000 + GAME_OVER_WAIT_SECS).await;
+        assert!(actor.players.is_empty(), "the held player is let go when the timer expires");
+    }
+
+    /// The lobby has no gameover timer: a lone player waiting for others is not a game over
+    #[tokio::test]
+    async fn gameover_timer_does_not_run_in_the_lobby() {
+        let mut actor = actor_with_players(1);
+        actor.game_loading = false;
+        actor.check_game_over(1000).await;
+        actor.check_game_over(1000 + GAME_OVER_WAIT_SECS).await;
+        assert_eq!(actor.game_over_time, 0);
+        assert!(actor.players.contains_key(&1));
     }
 
     /// After a desync kick the suspect bookkeeping must be clean: remove_player drops the

@@ -102,6 +102,13 @@ pub enum GameEvent {
         /// The verified realm (server host)
         spoofed_realm: String,
     },
+    /// A player pressed the lag screen's "Drop Players" button (W3GS_DROPREQ). The actor counts it as
+    /// a vote itself; BotCore checks whether the presser is an admin, who may drop the laggers alone
+    DropRequest {
+        name: String,
+        spoofed: bool,
+        spoofed_realm: String,
+    },
     /// Player enabled GProxy and registered a reconnect key (BotCore records key→host_counter for reconnect routing)
     GProxyRegistered { key: u32 },
     /// Countdown finished, loading started (triggers bnet to stop refreshing)
@@ -152,6 +159,9 @@ pub enum GameCommand {
         command: String,
         payload: String,
     },
+    /// An admin pressed the lag screen's "Drop Players" button: drop the laggers without a vote
+    /// (BotCore has verified permissions). Silent when nobody is lagging any more.
+    AdminDropLaggers { requester: String },
     /// Close this game
     Close,
 }

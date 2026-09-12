@@ -345,6 +345,14 @@ impl BotCore {
         }
     }
 
+    /// Whether `name`, verified on `realm` by spoofcheck, is a root admin of that realm or a db admin
+    async fn is_game_admin(&self, name: &str, realm: &str) -> bool {
+        self.bnets
+            .values()
+            .any(|h| server_key(&h.cfg) == realm && h.cfg.is_root_admin(name))
+            || self.db.admin_check(realm, name).await.unwrap_or(false)
+    }
+
     /// Command typed by a player in the lobby (root admin already verified). Replies go through in-game chat.
     /// Command typed by an in-game player (spoofcheck + admin already verified).
     /// Routed by host_counter back to "the game that issued the command" (lobby or in progress).
@@ -1063,6 +1071,16 @@ impl BotCore {
         match event {
             GameEvent::PlayerJoined { name } => info!(host_counter, "[GAME] player joined: {name}"),
             GameEvent::PlayerLeft { name } => info!(host_counter, "[GAME] player left: {name}"),
+            GameEvent::DropRequest { name, spoofed, spoofed_realm } => {
+                // The button is the only way to reach the bot from the lag screen, so an admin's
+                // press counts as !drop rather than as one vote among many. Same identity rule as
+                // typed commands: the name must have passed spoofcheck on a realm that lists them.
+                if spoofed && self.is_game_admin(&name, &spoofed_realm).await {
+                    info!(host_counter, "[GAME] admin [{name}] pressed drop on the lag screen");
+                    self.send_game_to(host_counter, GameCommand::AdminDropLaggers { requester: name })
+                        .await;
+                }
+            }
             GameEvent::GProxyRegistered { key } => {
                 debug!(host_counter, "[GAME] GProxy key registered {key:08X}");
                 self.gproxy_keys.insert(key, host_counter);
@@ -1093,17 +1111,7 @@ impl BotCore {
                         )
                         .await;
                     } else {
-                        let is_admin = self
-                            .bnets
-                            .values()
-                            .any(|h| {
-                                server_key(&h.cfg) == spoofed_realm && h.cfg.is_root_admin(&name)
-                            })
-                            || self
-                                .db
-                                .admin_check(&spoofed_realm, &name)
-                                .await
-                                .unwrap_or(false);
+                        let is_admin = self.is_game_admin(&name, &spoofed_realm).await;
                         if is_admin {
                             self.dispatch_lobby_command(host_counter, &name, &command, payload).await;
                         } else {
