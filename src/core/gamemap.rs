@@ -435,8 +435,14 @@ impl GameMap {
             OpenArchiveFlags::MPQ_OPEN_NO_LISTFILE | OpenArchiveFlags::MPQ_OPEN_NO_ATTRIBUTES,
         );
 
-        if mpq_result.is_err() {
-            warn!("[MAP] warning - unable to load MPQ file [ {} ]", &mpq_path);
+        if let Err(e) = &mpq_result {
+            // Include the StormLib error and the byte count actually read: the same file may open
+            // fine elsewhere, and this is the only clue about what differs on a given host
+            warn!(
+                "[MAP] warning - unable to load MPQ file [ {} ]: {e} (read {} bytes from disk)",
+                &mpq_path,
+                self.map_data_len
+            );
             return;
         } else {
             info!("[MAP] loading MPQ file [ {} ]", &mpq_path);
