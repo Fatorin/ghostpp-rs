@@ -106,7 +106,8 @@ Set `status_bind` (e.g. `0.0.0.0:6200`) to serve a read-only JSON snapshot of al
 
 ```json
 {
-  "version": "0.1.12", "started_at": 1759480000, "lobby_players": 3, "ingame_players": 10,
+  "bot": "MyHostBot", "version": "0.1.12", "started_at": 1759480000,
+  "lobby_players": 3, "ingame_players": 10,
   "games": [{
     "host_counter": 10, "name": "dota #10", "map": "Maps\\Download\\dota.w3x",
     "phase": "playing", "created_at": 1759481000, "started_at": 1759481300, "open_slots": 0,
@@ -116,7 +117,9 @@ Set `status_bind` (e.g. `0.0.0.0:6200`) to serve a read-only JSON snapshot of al
 ```
 
 - `phase`: `lobby` (countdown included) / `loading` / `playing`; `players` lists human players only
+- `bot` is the instance's bnet account name. With several instances, poll each one separately and key games by `(bot, started_at, host_counter)`; instances on one host need distinct `status_bind` ports
 - `started_at` (top level) changes when the bot restarts; `host_counter` restarts from 1 with it
+- If `status_bind` cannot be bound, the error is logged and the bot keeps running without the endpoint
 - Updates land within about a second of the change
 - Polling clients should reuse the connection (keep-alive), send the last `ETag` back as `If-None-Match` (an unchanged board answers `304` with no body), and send `Accept-Encoding: gzip`
 - Treat unknown fields as optional; fields may be added but are not renamed or removed

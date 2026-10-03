@@ -106,7 +106,8 @@ cargo run --release
 
 ```json
 {
-  "version": "0.1.12", "started_at": 1759480000, "lobby_players": 3, "ingame_players": 10,
+  "bot": "MyHostBot", "version": "0.1.12", "started_at": 1759480000,
+  "lobby_players": 3, "ingame_players": 10,
   "games": [{
     "host_counter": 10, "name": "dota #10", "map": "Maps\\Download\\dota.w3x",
     "phase": "playing", "created_at": 1759481000, "started_at": 1759481300, "open_slots": 0,
@@ -116,7 +117,9 @@ cargo run --release
 ```
 
 - `phase`:`lobby`(含倒數)/ `loading` / `playing`;`players` 只列真人玩家
+- `bot` 是該實例的 bnet 帳號名稱。多實例時請分別輪詢,並以 `(bot, started_at, host_counter)` 識別房間;同一台機器上的實例需使用不同的 `status_bind` port
 - 頂層 `started_at` 改變代表 bot 重啟過,`host_counter` 也會從 1 重新計數
+- `status_bind` 綁定失敗時只記錄 error,bot 照常運行(不提供端點)
 - 狀態變化後約 1 秒內反映
 - 輪詢端應重用連線(keep-alive)、把上次的 `ETag` 以 `If-None-Match` 帶回(沒變化時回 `304` 且無 body),並帶 `Accept-Encoding: gzip`
 - 未知欄位請忽略;之後只會新增欄位,不會改名或移除

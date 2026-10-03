@@ -17,7 +17,7 @@ pub mod util;
 use std::sync::Arc;
 
 use config::Config;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::bot::{BotConfig, BotCore};
@@ -72,8 +72,11 @@ async fn main() -> Result<(), GhostError> {
 
     // Load and spawn the battle.net / PVPGN connection
     // The config currently uses a single bnet_ section; multi-server support awaits a config format extension
+    // The bnet account also names this instance on the status endpoint (every instance logs in with its own)
+    let mut bot_name = String::new();
     if let Some(bnet_cfg) = bot::BnetConfig::load(&settings) {
         let server_id = 0usize;
+        bot_name = bnet_cfg.user_name.clone();
         info!("[GHOST] found battle.net connection for {}", bnet_cfg.alias);
         let tx = bot::bnet::spawn(server_id, bnet_cfg.clone(), event_tx.clone());
         core.add_bnet(server_id, tx, bnet_cfg);
@@ -106,20 +109,32 @@ async fn main() -> Result<(), GhostError> {
         None
     };
 
-    // Read-only status endpoint (status_bind); games publish to the board, the endpoint only reads it
+    // Read-only status endpoint (status_bind); games publish to the board, the endpoint only reads it.
+    // It is an add-on: failing to bind (e.g. a port clash with another instance) is logged and the
+    // bot carries on hosting without it - games then publish nothing at all.
     let _status = if core.config().status_bind.is_empty() {
         None
     } else {
-        let board = bot::status::StatusBoard::new();
-        core.set_status_board(std::sync::Arc::clone(&board));
-        Some(
-            bot::status::spawn(
-                &core.config().status_bind.clone(),
-                bot::status::AllowList::parse(&core.config().status_allow),
-                board,
-            )
-            .await?,
+        let board = bot::status::StatusBoard::new(bot_name);
+        match bot::status::spawn(
+            &core.config().status_bind.clone(),
+            bot::status::AllowList::parse(&core.config().status_allow),
+            Arc::clone(&board),
         )
+        .await
+        {
+            Ok(handle) => {
+                core.set_status_board(board);
+                Some(handle)
+            }
+            Err(e) => {
+                error!(
+                    "[STATUS] unable to bind the status endpoint on {}: {e} - continuing without it",
+                    core.config().status_bind
+                );
+                None
+            }
+        }
     };
 
     core.run().await;

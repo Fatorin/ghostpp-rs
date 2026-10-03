@@ -86,6 +86,8 @@ struct BoardState {
 /// The latest snapshot of every live game, shared between the GameActors (writers) and the
 /// HTTP endpoint (reader). The lock is only ever held to swap or clone an `Arc`.
 pub struct StatusBoard {
+    /// This instance's name (its bnet account), so a manager polling several bots can tell them apart
+    bot: String,
     /// Unix seconds the bot started. Part of the ETag, so a restarted bot (whose revision
     /// starts over) can never answer 304 to a tag handed out by the previous run.
     started_at: u64,
@@ -93,8 +95,9 @@ pub struct StatusBoard {
 }
 
 impl StatusBoard {
-    pub fn new() -> Arc<Self> {
+    pub fn new(bot: String) -> Arc<Self> {
         Arc::new(Self {
+            bot,
             started_at: unix_now(),
             state: Mutex::new(BoardState::default()),
         })
@@ -120,8 +123,11 @@ impl StatusBoard {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The bot name is folded in as a CRC so that no two instances share a tag even when they
+    /// start in the same second (and so the tag stays free of characters a name may carry)
     fn etag(&self, revision: u64) -> String {
-        format!("\"{:x}-{revision}\"", self.started_at)
+        let bot = crc32fast::hash(self.bot.as_bytes());
+        format!("\"{bot:08x}-{:x}-{revision}\"", self.started_at)
     }
 
     /// The ETag of the board as it is right now (no serialization)
@@ -151,6 +157,8 @@ impl StatusBoard {
         // Everything here must only change when the revision does, or the ETag would lie
         #[derive(Serialize)]
         struct Body<'a> {
+            /// This instance's bnet account
+            bot: &'a str,
             version: &'static str,
             /// Unix seconds the bot started
             started_at: u64,
@@ -159,6 +167,7 @@ impl StatusBoard {
             games: &'a [Arc<GameSnapshot>],
         }
         let body = Body {
+            bot: &self.bot,
             version: env!("CARGO_PKG_VERSION"),
             started_at: self.started_at,
             lobby_players: count("lobby"),
@@ -575,7 +584,7 @@ mod tests {
 
     #[test]
     fn publisher_skips_unchanged_state_and_cleans_up_on_drop() {
-        let board = StatusBoard::new();
+        let board = StatusBoard::new("testbot".into());
         let mut builds = 0;
         {
             let mut publisher = StatusPublisher::new(Arc::clone(&board), 7);
@@ -603,7 +612,7 @@ mod tests {
 
     #[test]
     fn json_counts_players_by_phase() {
-        let board = StatusBoard::new();
+        let board = StatusBoard::new("testbot".into());
         let player = |name: &str| PlayerSnapshot {
             name: name.into(),
             slot: 0,
@@ -623,6 +632,17 @@ mod tests {
         assert_eq!(json["lobby_players"], 1);
         assert_eq!(json["ingame_players"], 2);
         assert_eq!(json["games"][1]["players"][1]["name"], "z");
+        assert_eq!(json["bot"], "testbot");
+    }
+
+    #[test]
+    fn instances_never_share_an_etag() {
+        // Two instances started in the same second, at the same revision
+        let a = StatusBoard::new("bot-a".into());
+        let mut b = StatusBoard::new("bot-b".into());
+        Arc::get_mut(&mut b).unwrap().started_at = a.started_at;
+        assert_ne!(a.current_etag(), b.current_etag());
+        assert_ne!(a.to_json().0, b.to_json().0);
     }
 
     #[test]
@@ -696,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn keep_alive_connection_revalidates_with_etag() {
-        let board = StatusBoard::new();
+        let board = StatusBoard::new("testbot".into());
         let mut game = StatusPublisher::new(Arc::clone(&board), 3);
         game.update("lobby", |h| 0.hash(h), || ("dota #3".into(), "m".into(), 10, vec![]));
 
@@ -740,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn gzip_body_when_accepted() {
-        let board = StatusBoard::new();
+        let board = StatusBoard::new("testbot".into());
         let mut game = StatusPublisher::new(Arc::clone(&board), 1);
         game.update("lobby", |h| 0.hash(h), || ("g".into(), "m".into(), 5, vec![]));
         let (mut client, _server) = Client::connect(board).await;
@@ -764,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn http10_and_request_bodies_close_the_connection() {
-        let board = StatusBoard::new();
+        let board = StatusBoard::new("testbot".into());
         let (mut client, server) = Client::connect(Arc::clone(&board)).await;
         let (head, _) = client.request("GET /status HTTP/1.0\r\n\r\n").await;
         assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");

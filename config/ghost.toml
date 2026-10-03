@@ -87,6 +87,8 @@ bot_reconnectwaittime = 2
 ###  status_bind: address:port to listen on (leave blank to disable), e.g. "127.0.0.1:6200"
 ###  status_allow: comma-separated IPs or CIDR blocks allowed to connect, e.g. "10.0.0.5, 192.168.1.0/24"
 ###                (blank = loopback only; anyone else is disconnected without a reply)
+###  the JSON names this instance by its bnet account; with several instances give each its own port.
+###  if the address cannot be bound, the error is logged and the bot keeps running without the endpoint
 ###  there is no TLS: to expose it beyond a trusted network, put a reverse proxy (Caddy / nginx) in front
 
 status_bind = ""
