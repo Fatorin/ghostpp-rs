@@ -20,6 +20,7 @@ ghostpp-rs targets **Warcraft III 1.26–1.28 on PVPGN servers** (private realms
 - **Spoofcheck** — identity verification via the `sc` whisper (sent automatically by GProxy); in-game admin commands always require verification and check permissions against the verified realm
 - **Database** — both SQLite (default, zero-config) and PostgreSQL built in, switched by a single `db_url`; admins / bans / game & player records
 - **Replay saving** — every game is saved as a `.w3g` (zlib segmented packed container, playable directly in the W3 client)
+- **Status endpoint** — optional read-only `GET /status` JSON (games, phase, players) for external managers, isolated from the game loop
 - **i18n** — all user-visible messages go through a language catalog (Traditional Chinese and English built in, switched by one `bot_language` line)
 - **Commands** — 31 battle.net whisper commands + 30+ in-game commands, see [COMMANDS.md](COMMANDS.md)
 
@@ -98,6 +99,27 @@ On startup the bot logs in to PVPGN and (if autohost is enabled) starts hosting 
 | `bot_savereplays` / `bot_replaypath` | automatic replay saving |
 | `autohost_gamename` / `autohost_maxgames` / `autohost_startplayers` | autohosting |
 | `status_bind` / `status_allow` | read-only `GET /status` JSON endpoint (games, phase, players) and the IPs/CIDRs allowed to read it; blank bind = disabled |
+
+## Status endpoint
+
+Set `status_bind` (e.g. `0.0.0.0:6200`) to serve a read-only JSON snapshot of all games at `GET /status`. Only peers listed in `status_allow` (IPs / CIDR blocks; blank = loopback only) can connect; others are closed without a reply. There is no TLS or token, so also restrict the port in your firewall.
+
+```json
+{
+  "version": "0.1.12", "started_at": 1759480000, "lobby_players": 3, "ingame_players": 10,
+  "games": [{
+    "host_counter": 10, "name": "dota #10", "map": "Maps\\Download\\dota.w3x",
+    "phase": "playing", "created_at": 1759481000, "started_at": 1759481300, "open_slots": 0,
+    "players": [{ "name": "Alice", "slot": 0, "team": 0, "colour": 0, "observer": false, "reconnecting": false }]
+  }]
+}
+```
+
+- `phase`: `lobby` (countdown included) / `loading` / `playing`; `players` lists human players only
+- `started_at` (top level) changes when the bot restarts; `host_counter` restarts from 1 with it
+- Updates land within about a second of the change
+- Polling clients should reuse the connection (keep-alive), send the last `ETag` back as `If-None-Match` (an unchanged board answers `304` with no body), and send `Accept-Encoding: gzip`
+- Treat unknown fields as optional; fields may be added but are not renamed or removed
 
 ## Credits & license
 

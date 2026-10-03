@@ -20,6 +20,7 @@ ghostpp-rs 的目標平台為 **Warcraft III 1.26~1.28 + PVPGN 伺服器**(如�
 - **Spoofcheck** — 密語 `sc` 身分驗證(GProxy 自動發送),遊戲內管理指令一律要求驗證後才依 realm 比對權限
 - **資料庫** — SQLite(預設,零設定)與 PostgreSQL 皆內建,單一 `db_url` 切換;admin / ban / 遊戲與玩家紀錄
 - **Replay 儲存** — 每場自動存 `.w3g`(zlib 分段 packed 容器,W3 客戶端可直接播放)
+- **狀態端點** — 可選的唯讀 `GET /status` JSON(房間、階段、玩家),供外部管理工具讀取,與遊戲迴圈隔離
 - **i18n** — 使用者可見訊息全部走語言檔(內建繁體中文與英文,`bot_language` 一行切換)
 - **指令** — 31 個 battle.net 密語指令 + 30+ 遊戲內指令,完整清單見 [COMMANDS.zh-TW.md](COMMANDS.zh-TW.md)
 
@@ -98,6 +99,27 @@ cargo run --release
 | `bot_savereplays` / `bot_replaypath` | Replay 自動儲存 |
 | `autohost_gamename` / `autohost_maxgames` / `autohost_startplayers` | 自動開房 |
 | `status_bind` / `status_allow` | 唯讀 `GET /status` JSON 端點(房間、階段、玩家)與允許讀取的 IP/CIDR;bind 留空 = 停用 |
+
+## 狀態端點
+
+設定 `status_bind`(例 `0.0.0.0:6200`)即可在 `GET /status` 提供所有房間的唯讀 JSON 快照。只有 `status_allow` 列出的來源(IP / CIDR,留空 = 僅本機)能連線,其餘直接斷線、不回應。沒有 TLS 也沒有 token,請同時用防火牆限制該 port。
+
+```json
+{
+  "version": "0.1.12", "started_at": 1759480000, "lobby_players": 3, "ingame_players": 10,
+  "games": [{
+    "host_counter": 10, "name": "dota #10", "map": "Maps\\Download\\dota.w3x",
+    "phase": "playing", "created_at": 1759481000, "started_at": 1759481300, "open_slots": 0,
+    "players": [{ "name": "Alice", "slot": 0, "team": 0, "colour": 0, "observer": false, "reconnecting": false }]
+  }]
+}
+```
+
+- `phase`:`lobby`(含倒數)/ `loading` / `playing`;`players` 只列真人玩家
+- 頂層 `started_at` 改變代表 bot 重啟過,`host_counter` 也會從 1 重新計數
+- 狀態變化後約 1 秒內反映
+- 輪詢端應重用連線(keep-alive)、把上次的 `ETag` 以 `If-None-Match` 帶回(沒變化時回 `304` 且無 body),並帶 `Accept-Encoding: gzip`
+- 未知欄位請忽略;之後只會新增欄位,不會改名或移除
 
 ## 致謝與授權
 
