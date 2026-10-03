@@ -38,6 +38,10 @@ byteorder = "1.5.0"
 # --- Replay storage (.w3g, mirrors packed.cpp's zlib segmented container) ---
 flate2 = "1"
 
+# --- Status endpoint (JSON; both already in the tree via `config`) ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # --- Misc ---
 rand = "0.9"
 

@@ -97,6 +97,7 @@ cargo run --release
 | `bot_reconnect` / `bot_reconnectport` | GProxy++ 重連開關與埠 |
 | `bot_savereplays` / `bot_replaypath` | Replay 自動儲存 |
 | `autohost_gamename` / `autohost_maxgames` / `autohost_startplayers` | 自動開房 |
+| `status_bind` / `status_allow` | 唯讀 `GET /status` JSON 端點(房間、階段、玩家)與允許讀取的 IP/CIDR;bind 留空 = 停用 |
 
 ## 致謝與授權
 

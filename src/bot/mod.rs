@@ -10,6 +10,7 @@ pub mod bnet;
 pub mod console;
 pub mod listener;
 pub mod messages;
+pub mod status;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,6 +80,8 @@ pub struct BotCore {
     games_disabled: bool,
     /// Group B: map download mode (0=disabled / 1=enabled / 2=conditional; mirrors bot_downloads)
     download_mode: u8,
+    /// Status endpoint board handed to every game (None = status_bind not set)
+    status: Option<Arc<status::StatusBoard>>,
 }
 
 impl BotCore {
@@ -113,6 +116,7 @@ impl BotCore {
             gproxy_keys: HashMap::new(),
             games_disabled: false,
             download_mode,
+            status: None,
         };
 
         (core, event_tx)
@@ -207,6 +211,7 @@ impl BotCore {
                 .map(|h| h.cfg.user_name.clone())
                 .unwrap_or_default(),
             autostart_players,
+            status: self.status.clone(),
         };
         self.current_game = Some(game::spawn(gcfg, self.event_tx.clone()));
         info!("[GHOST] creating game [{game_name}] (host_counter={hc})");
@@ -458,6 +463,11 @@ impl BotCore {
     }
 
     /// Register an already-spawned bnet connection
+    /// Enable the status endpoint: every game created from now on publishes to this board
+    pub fn set_status_board(&mut self, board: Arc<status::StatusBoard>) {
+        self.status = Some(board);
+    }
+
     pub fn add_bnet(&mut self, server_id: usize, tx: mpsc::Sender<BnetCommand>, cfg: BnetConfig) {
         self.bnets.insert(server_id, BnetHandle { tx, cfg });
     }

@@ -534,6 +534,8 @@ dependencies = [
  "flate2",
  "futures",
  "rand 0.9.4",
+ "serde",
+ "serde_json",
  "sha1",
  "sqlx",
  "stormlib",

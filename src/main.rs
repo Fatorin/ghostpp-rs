@@ -106,6 +106,22 @@ async fn main() -> Result<(), GhostError> {
         None
     };
 
+    // Read-only status endpoint (status_bind); games publish to the board, the endpoint only reads it
+    let _status = if core.config().status_bind.is_empty() {
+        None
+    } else {
+        let board = bot::status::StatusBoard::new();
+        core.set_status_board(std::sync::Arc::clone(&board));
+        Some(
+            bot::status::spawn(
+                &core.config().status_bind.clone(),
+                bot::status::AllowList::parse(&core.config().status_allow),
+                board,
+            )
+            .await?,
+        )
+    };
+
     core.run().await;
 
     Ok(())

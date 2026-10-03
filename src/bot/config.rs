@@ -105,6 +105,12 @@ pub struct BotConfig {
 
     /// udp_broadcasttarget
     pub udp_broadcast_target: String,
+
+    // --- status endpoint ---
+    /// status_bind (address:port of the read-only status endpoint; empty = disabled)
+    pub status_bind: String,
+    /// status_allow (comma-separated IPs / CIDR blocks allowed to read it; empty = loopback only)
+    pub status_allow: String,
 }
 
 impl BotConfig {
@@ -186,6 +192,8 @@ impl BotConfig {
             auto_host_maximum_games: get_u32_from_config(config, "autohost_maxgames", 5),
             auto_host_auto_start_players: get_u8_from_config(config, "autohost_startplayers", 5),
             udp_broadcast_target: config.get_string("udp_broadcasttarget").unwrap_or_default(),
+            status_bind: config.get_string("status_bind").unwrap_or_default(),
+            status_allow: config.get_string("status_allow").unwrap_or_default(),
         }
     }
 }

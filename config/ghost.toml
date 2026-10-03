@@ -78,6 +78,20 @@ bot_reconnectport = 6114
 
 bot_reconnectwaittime = 2
 
+### read-only status endpoint: GET http://<status_bind>/status returns JSON with every game,
+###  its phase (lobby / loading / playing) and the players in it, for an external manager to poll.
+###  games publish to it at most once a second and only on change, so polling never touches a game.
+###  to keep polling traffic minimal: connections are kept alive, every response carries an ETag
+###  (send it back as If-None-Match and an unchanged board answers 304 with no body), and the body
+###  is gzipped when the request has Accept-Encoding: gzip.
+###  status_bind: address:port to listen on (leave blank to disable), e.g. "127.0.0.1:6200"
+###  status_allow: comma-separated IPs or CIDR blocks allowed to connect, e.g. "10.0.0.5, 192.168.1.0/24"
+###                (blank = loopback only; anyone else is disconnected without a reply)
+###  there is no TLS: to expose it beyond a trusted network, put a reverse proxy (Caddy / nginx) in front
+
+status_bind = ""
+status_allow = ""
+
 ### maximum number of games to host at once
 
 bot_maxgames = 5

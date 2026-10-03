@@ -1,6 +1,7 @@
 //! GameActor implementation (mirrors the lobby portion of C++ CBaseGame).
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,6 +95,8 @@ pub struct GameConfig {
     pub replay_build_number: u16,
     /// Map download mode (0=disabled / 1=enabled / 2=conditional; !downloads)
     pub download_mode: u8,
+    /// Status endpoint board (None = status endpoint disabled, nothing is published)
+    pub status: Option<Arc<crate::bot::status::StatusBoard>>,
 }
 
 /// The game handle held by BotCore
@@ -280,6 +283,8 @@ struct GameActor {
     /// game closes instead of lingering on one player - the winner still sitting at the score
     /// screen, or a GProxy++ player being held for a reconnect nobody else is waiting for.
     game_over_time: u64,
+    /// Publishes this game to the status endpoint (removes it again when the actor is dropped)
+    status: Option<crate::bot::status::StatusPublisher>,
 }
 
 /// How long a game is allowed to run with a single player left before it is closed
@@ -300,6 +305,10 @@ impl GameActor {
         let sync_window_ms = SYNC_TOLERANCE_MS;
         // The HCL initial value comes from the map default (overridable by !hcl)
         let hcl_string = cfg.map.get_map_default_hcl().to_string();
+        let status = cfg
+            .status
+            .clone()
+            .map(|board| crate::bot::status::StatusPublisher::new(board, cfg.host_counter));
         Self {
             cfg,
             event_tx,
@@ -346,6 +355,7 @@ impl GameActor {
             hcl_string,
             pending_drop: Vec::new(),
             game_over_time: 0,
+            status,
         }
     }
 
@@ -354,6 +364,8 @@ impl GameActor {
             "[GAME: {}] lobby created (host_counter={})",
             self.cfg.game_name, self.cfg.host_counter
         );
+        // Show the new lobby on the status endpoint right away rather than on the first tick
+        self.publish_status();
 
         // Hold the raw map bytes for this game's lifetime (map downloads need them).
         // The read can be tens of MB, so it runs on a blocking thread; commands simply
@@ -428,6 +440,7 @@ impl GameActor {
                 }
                 _ = slot_info_tick.tick() => {
                     self.check_game_over(crate::util::get_time()).await;
+                    self.publish_status();
                     if self.slot_info_changed && !self.started {
                         self.slot_info_changed = false;
                         self.send_all_slot_info().await;
@@ -3174,6 +3187,67 @@ impl GameActor {
     }
 
     /// Find the slot index occupied by that PID
+    /// Push this game's lobby/roster to the status endpoint when it changed (runs once a second).
+    /// An unchanged game costs a hash over its slots; nothing is allocated unless it changed.
+    fn publish_status(&mut self) {
+        let Some(status) = self.status.as_mut() else {
+            return;
+        };
+        let phase = if self.game_loaded {
+            "playing"
+        } else if self.started {
+            "loading"
+        } else {
+            "lobby"
+        };
+        let (slots, players, cfg) = (&self.slots, &self.players, &self.cfg);
+        let player_in = |s: &GameSlot| {
+            if s.slot_status == SLOTSTATUS_OCCUPIED && s.computer == 0 {
+                players.get(&s.pid)
+            } else {
+                None
+            }
+        };
+        status.update(
+            phase,
+            |h| {
+                for s in slots {
+                    (s.pid, s.slot_status, s.computer, s.team, s.colour).hash(h);
+                    if let Some(p) = player_in(s) {
+                        (&p.name, p.gproxy_disconnected).hash(h);
+                    }
+                }
+            },
+            || {
+                let open_slots = if phase == "lobby" {
+                    slots.iter().filter(|s| s.slot_status == SLOTSTATUS_OPEN).count() as u8
+                } else {
+                    0
+                };
+                let roster = slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(sid, s)| {
+                        player_in(s).map(|p| crate::bot::status::PlayerSnapshot {
+                            name: p.name.clone(),
+                            slot: sid as u8,
+                            team: s.team,
+                            colour: s.colour,
+                            observer: s.team == MAX_SLOTS as u8,
+                            reconnecting: p.gproxy_disconnected,
+                        })
+                    })
+                    .collect();
+                (
+                    cfg.game_name.clone(),
+                    cfg.map.get_map_path().to_string(),
+                    open_slots,
+                    roster,
+                )
+            },
+        );
+    }
+
     fn slot_index_of_pid(&self, pid: u8) -> Option<usize> {
         self.slots.iter().position(|s| s.pid == pid)
     }
@@ -3367,6 +3441,7 @@ mod tests {
             replay_war3_version: 26,
             replay_build_number: 6059,
             download_mode: 1,
+            status: None,
         }
     }
 

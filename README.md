@@ -97,6 +97,7 @@ On startup the bot logs in to PVPGN and (if autohost is enabled) starts hosting 
 | `bot_reconnect` / `bot_reconnectport` | GProxy++ reconnect toggle and port |
 | `bot_savereplays` / `bot_replaypath` | automatic replay saving |
 | `autohost_gamename` / `autohost_maxgames` / `autohost_startplayers` | autohosting |
+| `status_bind` / `status_allow` | read-only `GET /status` JSON endpoint (games, phase, players) and the IPs/CIDRs allowed to read it; blank bind = disabled |
 
 ## Credits & license
 
