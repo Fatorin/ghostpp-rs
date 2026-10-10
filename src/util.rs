@@ -21,14 +21,55 @@ pub fn util_encode_ansi(s: &str) -> Vec<u8> {
     s.as_bytes().to_vec()
 }
 
-/// Current time as "YYYY-MM-DD HH:MM:SS" (UTC; used by database records)
-pub fn now_datetime_string() -> String {
-    let secs = std::time::SystemTime::now()
+/// Wall-clock Unix time in seconds (for persisted timestamps such as mute expiry; get_time() is since startup)
+pub fn unix_time() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, mo, d, h, mi, s) = crate::bncsutil::checkrevision::civil_from_unix(secs);
+        .unwrap_or(0)
+}
+
+/// Current time as "YYYY-MM-DD HH:MM:SS" (UTC; used by database records)
+pub fn now_datetime_string() -> String {
+    let (y, mo, d, h, mi, s) = crate::bncsutil::checkrevision::civil_from_unix(unix_time());
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
+/// Parse a duration token like "30m" / "12h" / "3d" into seconds; "perm" → Some(0) (permanent).
+/// Returns None when the token is not a duration (so the caller can treat it as free text).
+pub fn parse_duration_secs(token: &str) -> Option<u64> {
+    let t = token.to_ascii_lowercase();
+    if t == "perm" || t == "permanent" {
+        return Some(0);
+    }
+    let unit = match t.chars().last()? {
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return None,
+    };
+    let n: u64 = t[..t.len() - 1].parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    n.checked_mul(unit)
+}
+
+/// Format a number of seconds as a compact "2d5h" / "3h20m" / "45m" string (rounded up to the minute)
+pub fn format_duration_secs(secs: u64) -> String {
+    let mins = secs.div_ceil(60).max(1);
+    let (d, h, m) = (mins / 1440, mins / 60 % 24, mins % 60);
+    let mut out = String::new();
+    if d > 0 {
+        out.push_str(&format!("{d}d"));
+    }
+    if h > 0 {
+        out.push_str(&format!("{h}h"));
+    }
+    if m > 0 && d == 0 {
+        out.push_str(&format!("{m}m"));
+    }
+    out
 }
 
 /// Program startup reference point.
@@ -321,6 +362,26 @@ pub fn get_command_and_payload(message: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use crate::util::*;
+
+    #[test]
+    fn test_parse_duration_secs() {
+        assert_eq!(parse_duration_secs("30m"), Some(1800));
+        assert_eq!(parse_duration_secs("12H"), Some(43_200));
+        assert_eq!(parse_duration_secs("3d"), Some(259_200));
+        assert_eq!(parse_duration_secs("perm"), Some(0));
+        assert_eq!(parse_duration_secs("0d"), None);
+        assert_eq!(parse_duration_secs("d"), None);
+        assert_eq!(parse_duration_secs("spam"), None);
+        assert_eq!(parse_duration_secs("惡意"), None);
+    }
+
+    #[test]
+    fn test_format_duration_secs() {
+        assert_eq!(format_duration_secs(259_200), "3d");
+        assert_eq!(format_duration_secs(2 * 86_400 + 5 * 3600 + 59), "2d5h");
+        assert_eq!(format_duration_secs(3 * 3600 + 20 * 60), "3h20m");
+        assert_eq!(format_duration_secs(30), "1m");
+    }
 
     #[test]
     fn test_util_byte_array_to_hex_string() {

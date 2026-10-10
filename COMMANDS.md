@@ -119,8 +119,9 @@ Handled by GameActor (`handle_admin_command`):
 | `!sp` | admin | Shuffle players (randomly reassign occupied human players across occupied slots). |
 | `!hold <name> [name...]` | admin | Reserve names: add names (lowercased) to the hold list; consumed once on join. |
 | `!download <name>`, `!dl <name>` | admin | Approve one player's map download when `bot_allowdownloads` is `2` (conditional). Partial name match; sends STARTDOWNLOAD and begins feeding map parts. Rejected once the game has started. |
-| `!mute <name>` | admin | Mute a player (their messages are not relayed). Partial name match. |
-| `!unmute <name>` | admin | Unmute. |
+| `!mute <name> [duration] [reason]` | admin | Mute a player (their chat is not relayed to others) and save them to the database mute list, so they join every later game muted until it expires (it also lifts mid-game). Duration is `30m` / `12h` / `3d` / `perm`; omitted = 3 days; muting again overwrites the expiry. The name is partial-matched in this game first; if nobody matches it is taken verbatim and only added to the list. Only chat is blocked — commands and replays are unaffected. |
+| `!unmute <name>` | admin | Unmute and remove from the mute list (works by exact name for players not in this game). |
+| `!mutelist` | admin | Privately list every mute still in effect with its time left, e.g. `troll(2d5h)`, `spammer(permanent)`; long lists are split over several lines. |
 | `!muteall` | admin | Mute all: in game only blocks "all"-scope public messages (flag 32, mode 0); team / private still pass. |
 | `!unmuteall` | admin | Undo mute-all. |
 | `!check [name]` | admin | Whisper-reply with player info (ping, spoofed, realm); omitting the name queries yourself. |

@@ -114,8 +114,9 @@
 | `!sp` | admin | 洗牌(將佔用中的真人玩家在各佔用 slot 間隨機重排)。 |
 | `!hold <name> [name...]` | admin | 保留名額:將名字(小寫)加入保留名單,加入時消耗一次。 |
 | `!download <name>`、`!dl <name>` | admin | 當 `bot_allowdownloads` 為 `2`(條件式)時,核准單一玩家下載地圖。支援名稱部分比對;會送出 STARTDOWNLOAD 並開始傳送地圖分段。遊戲開始後拒絕。 |
-| `!mute <name>` | admin | 靜音玩家(其訊息不轉發)。名稱部分比對。 |
-| `!unmute <name>` | admin | 解除靜音。 |
+| `!mute <name> [時間] [原因]` | admin | 禁言玩家(其聊天不轉發給其他人)並寫入資料庫的禁言名單,之後每場加入都會自動禁言,到期後自動解除(遊戲中途到期也會解除)。時間格式 `30m` / `12h` / `3d` / `perm`(永久),省略=3 天;重複禁言會覆蓋舊的到期時間。名稱先在本場部分比對,找不到則視為完整名稱,只寫入名單。僅擋聊天,指令與錄像照常。 |
+| `!unmute <name>` | admin | 解除禁言並從禁言名單移除(不在本場的玩家也可用完整名稱移除)。 |
+| `!mutelist` | admin | 私訊列出所有仍有效的禁言與剩餘時間,例如 `troll(2d5h)`、`spammer(永久)`;過長會分成多行。 |
 | `!muteall` | admin | 全場靜音:遊戲中僅擋「全體」公開訊息(flag 32 且 mode 0);隊伍 / 私訊仍放行。 |
 | `!unmuteall` | admin | 解除全場靜音。 |
 | `!check [name]` | admin | 私訊回覆玩家資訊(ping、spoofed、realm);省略名稱=查自己。 |

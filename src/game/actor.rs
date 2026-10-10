@@ -23,7 +23,10 @@ use crate::net::conn::{
     self, CloseReason, ConnEvent, ConnHandle, ConnId, DEFAULT_RECV_TIMEOUT,
     WRITE_QUEUE_MAX_BYTES,
 };
-use crate::util::{get_ticks, util_byte_array_to_u32, util_encode_stat_string};
+use crate::util::{
+    format_duration_secs, get_ticks, parse_duration_secs, unix_time, util_byte_array_to_u32,
+    util_encode_stat_string,
+};
 
 /// The set of legal characters for the HCL command string (mirrors C++ game_base.cpp)
 pub const HCL_ALLOWED_CHARS: &str = "abcdefghijklmnopqrstuvwxyz0123456789 -=,.";
@@ -47,6 +50,9 @@ pub const DESYNC_REPORT_LIMIT: u32 = 10;
 /// A player reporting a state the rest of the game was in a few turns ago is a stream that
 /// slipped, not a game that parted company - and that is the distinction worth logging.
 pub const DESYNC_HISTORY: usize = 48;
+
+/// How long `!mute <name>` lasts when no duration is given (3 days)
+pub const DEFAULT_MUTE_SECS: u64 = 3 * 86_400;
 
 /// Cap on the GProxy++ replay buffer held per disconnected player.
 ///
@@ -185,6 +191,8 @@ struct LobbyPlayer {
 
     /// Muted (!mute: messages are not forwarded to others)
     muted: bool,
+    /// When the mute lifts (Unix seconds, 0 = permanent); checked on every message so it ends mid-game
+    mute_expires: u64,
     /// The most recent RTTs (ms; computed when a PONG returns, averaged by !ping)
     pings: std::collections::VecDeque<u32>,
 }
@@ -817,18 +825,101 @@ impl GameActor {
                 }
             }
             // ---- mute ----
+            // !mute <name> [30m|12h|3d|perm] [reason]: mute and save to the blacklist (default 3 days).
+            // A name not in this game is taken verbatim and only written to the blacklist.
             "mute" => {
-                let name = self.set_muted(arg, true);
-                match name {
-                    Some(n) => self.send_all_chat(&crate::lang::t("player_muted", &[("name", &n)])).await,
+                let (target, rest) = match arg.split_once(char::is_whitespace) {
+                    Some((t, r)) => (t, r.trim()),
+                    None => (arg, ""),
+                };
+                if target.is_empty() {
+                    self.reply_to(req_pid, &crate::lang::t("mute_usage", &[])).await;
+                    return true;
+                }
+                let (secs, reason) = match rest.split_whitespace().next().and_then(parse_duration_secs) {
+                    Some(s) => (s, rest.split_once(char::is_whitespace).map_or("", |(_, r)| r.trim())),
+                    None => (DEFAULT_MUTE_SECS, rest),
+                };
+                let expires = if secs == 0 { 0 } else { unix_time() + secs };
+                let found = self
+                    .find_player_pid(target)
+                    .and_then(|pid| self.players.get_mut(&pid))
+                    .map(|p| {
+                        p.muted = true;
+                        p.mute_expires = expires;
+                        (p.name.clone(), p.spoofed_realm.clone())
+                    });
+                let in_game = found.is_some();
+                let (name, realm) = found.unwrap_or_else(|| (target.to_string(), String::new()));
+                let record = crate::db::MuteRecord {
+                    server: if realm.is_empty() { self.db_servers().swap_remove(0) } else { realm },
+                    name: name.clone(),
+                    date: crate::util::now_datetime_string(),
+                    expires,
+                    admin: requester.to_string(),
+                    reason: reason.to_string(),
+                };
+                let saved = self.cfg.db.mute_add(&record).await;
+                let duration = mute_duration_text(secs);
+                let vars = [("name", name.as_str()), ("duration", duration.as_str())];
+                if in_game {
+                    self.send_all_chat(&crate::lang::t("player_muted", &vars)).await;
+                } else if saved.is_ok() {
+                    self.reply_to(req_pid, &crate::lang::t("mute_offline_added", &vars)).await;
+                }
+                if let Err(e) = saved {
+                    warn!("[GAME: {}] saving mute for [{name}] failed: {e}", self.cfg.game_name);
+                    self.reply_to(req_pid, &crate::lang::t("mute_save_failed", &[("error", &e.to_string())]))
+                        .await;
+                }
+            }
+            // !unmute <name>: lift the mute in this game and remove it from the blacklist
+            "unmute" => {
+                let target = arg.split_whitespace().next().unwrap_or("");
+                if target.is_empty() {
+                    self.reply_to(req_pid, &crate::lang::t("mute_usage", &[])).await;
+                    return true;
+                }
+                let found = self.clear_mute(target);
+                let name = found.clone().unwrap_or_else(|| target.to_string());
+                let mut removed = false;
+                for server in self.db_servers() {
+                    match self.cfg.db.mute_remove(&server, &name).await {
+                        Ok(r) => removed |= r,
+                        Err(e) => warn!("[GAME: {}] removing mute for [{name}] failed: {e}", self.cfg.game_name),
+                    }
+                }
+                let msg = crate::lang::t("player_unmuted", &[("name", &name)]);
+                match found {
+                    Some(_) => self.send_all_chat(&msg).await,
+                    None if removed => self.reply_to(req_pid, &msg).await,
                     None => self.reply_to(req_pid, &crate::lang::t("player_not_found", &[])).await,
                 }
             }
-            "unmute" => {
-                let name = self.set_muted(arg, false);
-                match name {
-                    Some(n) => self.send_all_chat(&crate::lang::t("player_unmuted", &[("name", &n)])).await,
-                    None => self.reply_to(req_pid, &crate::lang::t("player_not_found", &[])).await,
+            // !mutelist: privately list every mute still in effect, with the time left
+            "mutelist" => {
+                let now = unix_time();
+                let mut entries = Vec::new();
+                for server in self.db_servers() {
+                    match self.cfg.db.mute_list(&server, now).await {
+                        Ok(list) => entries.extend(list.into_iter().map(|m| {
+                            let left = if m.expires == 0 { 0 } else { m.expires.saturating_sub(now).max(1) };
+                            format!("{}({})", m.name, mute_duration_text(left))
+                        })),
+                        Err(e) => {
+                            self.reply_to(req_pid, &crate::lang::t("query_failed", &[("error", &e.to_string())]))
+                                .await;
+                            return true;
+                        }
+                    }
+                }
+                if entries.is_empty() {
+                    self.reply_to(req_pid, &crate::lang::t("mute_list_empty", &[])).await;
+                    return true;
+                }
+                let header = crate::lang::t("mute_list", &[("count", &entries.len().to_string())]);
+                for line in chunk_chat_lines(&header, &entries) {
+                    self.reply_to(req_pid, &line).await;
                 }
             }
             "muteall" => {
@@ -1003,12 +1094,22 @@ impl GameActor {
         }
     }
 
-    /// Set/clear mute, returning the player's display name (None if not found). The borrow ends here so the caller can borrow self again.
-    fn set_muted(&mut self, name: &str, muted: bool) -> Option<String> {
+    /// Clear a player's mute, returning their display name (None if not found). The borrow ends here so the caller can borrow self again.
+    fn clear_mute(&mut self, name: &str) -> Option<String> {
         let pid = self.find_player_pid(name)?;
         let p = self.players.get_mut(&pid)?;
-        p.muted = muted;
+        p.muted = false;
+        p.mute_expires = 0;
         Some(p.name.clone())
+    }
+
+    /// The servers the mute blacklist is keyed under; a bot with no bnet servers uses "" so the list still works
+    fn db_servers(&self) -> Vec<String> {
+        if self.cfg.servers.is_empty() {
+            vec![String::new()]
+        } else {
+            self.cfg.servers.clone()
+        }
     }
 
     /// The player's average RTT (ms); shows one-way (÷2) when lc_pings. Returns None if there is no data.
@@ -2063,6 +2164,19 @@ impl GameActor {
             }
         }
 
+        // Mute blacklist: a joiner with an active mute starts muted (Some(expires), 0 = permanent)
+        let mut mute_expires = None;
+        for server in self.db_servers() {
+            match self.cfg.db.mute_check(&server, &join.name, unix_time()).await {
+                Ok(Some(m)) => {
+                    mute_expires = Some(m.expires);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => warn!("[GAME: {}] mute check failed (not muting): {e}", self.cfg.game_name),
+            }
+        }
+
         // !hold: if the joiner is on the reserved list, consume the reservation and log it (mirrors the C++ reserved concept)
         let jname = join.name.to_lowercase();
         if let Some(idx) = self.held_names.iter().position(|n| *n == jname) {
@@ -2183,7 +2297,8 @@ impl GameActor {
                 disconnect_time: 0,
                 spoofed: false,
                 spoofed_realm: String::new(),
-                muted: false,
+                muted: mute_expires.is_some(),
+                mute_expires: mute_expires.unwrap_or(0),
                 pings: Default::default(),
             },
         );
@@ -2206,6 +2321,13 @@ impl GameActor {
 
         // 6) broadcast the updated slot info to the whole game
         self.send_all_slot_info().await;
+
+        if let Some(expires) = mute_expires {
+            let remaining = if expires == 0 { 0 } else { expires.saturating_sub(unix_time()).max(1) };
+            info!("[GAME: {}] [{}] is on the mute list, joined muted", self.cfg.game_name, join.name);
+            let msg = crate::lang::t("mute_join_notice", &[("duration", &mute_duration_text(remaining))]);
+            self.send_private_chat(pid, &msg).await;
+        }
 
         let _ = self
             .event_tx
@@ -3010,14 +3132,21 @@ impl GameActor {
 
     /// Relay lobby chat: forward CHAT_TO_HOST as CHAT_FROM_HOST to the to_pids
     async fn relay_chat(&mut self, chat: IncomingChatPlayer) {
-        // !mute: a muted sender's message is not forwarded
-        let sender_muted = self
+        // !mute: a muted sender's message is not forwarded, unless the mute has just run out
+        let (muted, expires) = self
             .players
             .get(&chat.from_pid)
-            .map(|p| p.muted)
-            .unwrap_or(false);
-        if sender_muted {
-            return;
+            .map(|p| (p.muted, p.mute_expires))
+            .unwrap_or((false, 0));
+        if muted {
+            if expires == 0 || unix_time() < expires {
+                return;
+            }
+            if let Some(p) = self.players.get_mut(&chat.from_pid) {
+                p.muted = false;
+                p.mute_expires = 0;
+            }
+            self.send_private_chat(chat.from_pid, &crate::lang::t("mute_expired", &[])).await;
         }
         // !muteall: in-game, block "global" public messages (flag 32 and extra_flags[0]==0 = all);
         // team (>=2) / private messages still pass (mirrors C++ MuteAll blocking only global)
@@ -3323,6 +3452,39 @@ fn left_reason_text(left_code: u32) -> &'static str {
     }
 }
 
+/// Mute length for chat messages: "3d" / "12h", or the localized "permanent" for 0
+fn mute_duration_text(secs: u64) -> String {
+    if secs == 0 {
+        crate::lang::t("mute_permanent", &[])
+    } else {
+        format_duration_secs(secs)
+    }
+}
+
+/// Pack comma-separated entries into chat lines under the client's ~255-byte message limit,
+/// the first line led by `header` (sizes are UTF-8 bytes, so CJK names count 3 each)
+fn chunk_chat_lines(header: &str, entries: &[String]) -> Vec<String> {
+    const MAX_BYTES: usize = 200;
+    let mut lines = Vec::new();
+    let mut cur = header.to_string();
+    let mut fresh = true;
+    for entry in entries {
+        if !fresh && cur.len() + 2 + entry.len() > MAX_BYTES {
+            lines.push(std::mem::take(&mut cur));
+            fresh = true;
+        }
+        if !fresh {
+            cur.push_str(", ");
+        } else if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(entry);
+        fresh = false;
+    }
+    lines.push(cur);
+    lines
+}
+
 /// GProxy buffer trim: the client reports having received last_packet packets, so drop the acknowledged ones from the front
 /// (mirrors the C++ GPS_ACK handling: PacketsAlreadyUnqueued = TotalSent - buffer.size())
 fn trim_gproxy_buffer(p: &mut LobbyPlayer, last_packet: u32) {
@@ -3379,7 +3541,7 @@ fn addr_bytes(peer: SocketAddr, hide: bool) -> (Vec<u8>, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{BanRecord, DbResult, GamePlayerRecord, GameRecord, GhostDb};
+    use crate::db::{BanRecord, DbResult, GamePlayerRecord, GameRecord, GhostDb, MuteRecord};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -3414,9 +3576,31 @@ mod tests {
         async fn ban_list(&self, _: &str) -> DbResult<Vec<BanRecord>> {
             Ok(vec![])
         }
+        async fn mute_add(&self, _: &MuteRecord) -> DbResult<bool> {
+            Ok(true)
+        }
+        async fn mute_remove(&self, _: &str, _: &str) -> DbResult<bool> {
+            Ok(false)
+        }
+        async fn mute_check(&self, _: &str, _: &str, _: u64) -> DbResult<Option<MuteRecord>> {
+            Ok(None)
+        }
+        async fn mute_list(&self, _: &str, _: u64) -> DbResult<Vec<MuteRecord>> {
+            Ok(vec![])
+        }
         async fn game_add(&self, _: &GameRecord, _: &[GamePlayerRecord]) -> DbResult<u64> {
             Ok(0)
         }
+    }
+
+    #[test]
+    fn chunk_chat_lines_splits_under_limit() {
+        assert_eq!(chunk_chat_lines("List (1):", &["a(3d)".into()]), vec!["List (1): a(3d)"]);
+        let entries: Vec<String> = (0..40).map(|i| format!("禁言玩家{i:02}(2d5h)")).collect();
+        let lines = chunk_chat_lines("List (40):", &entries);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|l| l.len() <= 200));
+        assert_eq!(lines.join(", ").matches("禁言玩家").count(), 40);
     }
 
     fn make_cfg(map: Arc<GameMap>) -> GameConfig {
@@ -3510,6 +3694,7 @@ mod tests {
             spoofed: false,
             spoofed_realm: String::new(),
             muted: false,
+            mute_expires: 0,
             pings: Default::default(),
         }
     }

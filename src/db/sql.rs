@@ -8,14 +8,14 @@
 use async_trait::async_trait;
 use sqlx::Row;
 
-use super::{BanRecord, DbError, DbResult, GamePlayerRecord, GameRecord, GhostDb};
+use super::{BanRecord, DbError, DbResult, GamePlayerRecord, GameRecord, GhostDb, MuteRecord};
 
 fn e(err: sqlx::Error) -> DbError {
     DbError::Backend(err.to_string())
 }
 
 /// Shared schema (`{ID}` = each backend's auto-increment primary key column definition)
-const SCHEMA: [&str; 4] = [
+const SCHEMA: [&str; 5] = [
     "CREATE TABLE IF NOT EXISTS admins (
         server TEXT NOT NULL,
         name   TEXT NOT NULL,
@@ -58,6 +58,16 @@ const SCHEMA: [&str; 4] = [
         colour       BIGINT NOT NULL DEFAULT 0,
         spoofedrealm TEXT NOT NULL DEFAULT ''
     )",
+    // Chat blacklist (expires = Unix seconds, 0 = permanent)
+    "CREATE TABLE IF NOT EXISTS mutes (
+        server  TEXT NOT NULL,
+        name    TEXT NOT NULL,
+        date    TEXT NOT NULL DEFAULT '',
+        expires BIGINT NOT NULL DEFAULT 0,
+        admin   TEXT NOT NULL DEFAULT '',
+        reason  TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (server, name)
+    )",
 ];
 
 // ---- Shared queries (syntax identical for both backends) ----
@@ -74,6 +84,16 @@ const Q_BAN_ADD: &str = "INSERT INTO bans (server, name, ip, date, gamename, adm
        admin = EXCLUDED.admin, reason = EXCLUDED.reason";
 const Q_BAN_DEL: &str = "DELETE FROM bans WHERE server = $1 AND name = $2";
 const Q_BAN_SELECT: &str = "SELECT server, name, ip, date, gamename, admin, reason FROM bans";
+const Q_MUTE_ADD: &str = "INSERT INTO mutes (server, name, date, expires, admin, reason)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (server, name) DO UPDATE SET
+       date = EXCLUDED.date, expires = EXCLUDED.expires,
+       admin = EXCLUDED.admin, reason = EXCLUDED.reason";
+const Q_MUTE_DEL: &str = "DELETE FROM mutes WHERE server = $1 AND name = $2";
+const Q_MUTE_CHECK: &str = "SELECT server, name, date, expires, admin, reason FROM mutes
+     WHERE server = $1 AND name = $2 AND (expires = 0 OR expires > $3)";
+const Q_MUTE_LIST: &str = "SELECT server, name, date, expires, admin, reason FROM mutes
+     WHERE server = $1 AND (expires = 0 OR expires > $2) ORDER BY name";
 const Q_GAME_ADD: &str =
     "INSERT INTO games (server, map, datetime, gamename, ownername, duration)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING id";
@@ -226,6 +246,73 @@ macro_rules! impl_sql_ghost_db {
                     .collect())
             }
 
+            async fn mute_add(&self, mute: &MuteRecord) -> DbResult<bool> {
+                let r = sqlx::query(Q_MUTE_ADD)
+                    .bind(&mute.server)
+                    .bind(mute.name.to_lowercase())
+                    .bind(&mute.date)
+                    .bind(mute.expires as i64)
+                    .bind(&mute.admin)
+                    .bind(&mute.reason)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(e)?;
+                Ok(r.rows_affected() > 0)
+            }
+
+            async fn mute_remove(&self, server: &str, name: &str) -> DbResult<bool> {
+                let r = sqlx::query(Q_MUTE_DEL)
+                    .bind(server)
+                    .bind(name.to_lowercase())
+                    .execute(&self.pool)
+                    .await
+                    .map_err(e)?;
+                Ok(r.rows_affected() > 0)
+            }
+
+            async fn mute_check(
+                &self,
+                server: &str,
+                name: &str,
+                now: u64,
+            ) -> DbResult<Option<MuteRecord>> {
+                let row = sqlx::query(Q_MUTE_CHECK)
+                    .bind(server)
+                    .bind(name.to_lowercase())
+                    .bind(now as i64)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(e)?;
+                Ok(row.map(|r| MuteRecord {
+                    server: r.get(0),
+                    name: r.get(1),
+                    date: r.get(2),
+                    expires: r.get::<i64, _>(3) as u64,
+                    admin: r.get(4),
+                    reason: r.get(5),
+                }))
+            }
+
+            async fn mute_list(&self, server: &str, now: u64) -> DbResult<Vec<MuteRecord>> {
+                let rows = sqlx::query(Q_MUTE_LIST)
+                    .bind(server)
+                    .bind(now as i64)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(e)?;
+                Ok(rows
+                    .iter()
+                    .map(|r| MuteRecord {
+                        server: r.get(0),
+                        name: r.get(1),
+                        date: r.get(2),
+                        expires: r.get::<i64, _>(3) as u64,
+                        admin: r.get(4),
+                        reason: r.get(5),
+                    })
+                    .collect())
+            }
+
             async fn game_add(
                 &self,
                 game: &GameRecord,
@@ -297,5 +384,44 @@ impl PgDb {
             .await
             .map_err(e)?;
         Self::init(pool, "PostgreSQL".to_string(), "id BIGSERIAL PRIMARY KEY").await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mute_expiry_is_respected() {
+        let file = std::env::temp_dir().join(format!("ghostpp-mute-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let db = SqliteDb::connect(file.to_str().unwrap()).await.unwrap();
+
+        let mut m = MuteRecord {
+            server: "s".into(),
+            name: "Troll".into(),
+            expires: 1000,
+            ..Default::default()
+        };
+        db.mute_add(&m).await.unwrap();
+        assert!(db.mute_check("s", "troll", 999).await.unwrap().is_some());
+        assert!(db.mute_check("s", "TROLL", 1000).await.unwrap().is_none());
+
+        // Muting again overwrites the expiry; 0 = permanent
+        m.expires = 0;
+        db.mute_add(&m).await.unwrap();
+        assert!(db.mute_check("s", "troll", u32::MAX as u64).await.unwrap().is_some());
+
+        // The list only shows mutes still in effect
+        let expired = MuteRecord { name: "Gone".into(), expires: 500, ..m.clone() };
+        db.mute_add(&expired).await.unwrap();
+        let names: Vec<String> = db.mute_list("s", 600).await.unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["troll".to_string()]);
+
+        assert!(db.mute_remove("s", "Troll").await.unwrap());
+        assert!(db.mute_check("s", "troll", 0).await.unwrap().is_none());
+
+        drop(db);
+        let _ = std::fs::remove_file(&file);
     }
 }

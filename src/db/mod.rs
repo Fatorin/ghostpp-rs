@@ -35,6 +35,19 @@ pub struct BanRecord {
     pub reason: String,
 }
 
+/// A single mute (chat blacklist) record
+#[derive(Debug, Clone, Default)]
+pub struct MuteRecord {
+    pub server: String,
+    pub name: String,
+    /// Creation time (display string)
+    pub date: String,
+    /// Expiry as Unix seconds (0 = permanent)
+    pub expires: u64,
+    pub admin: String,
+    pub reason: String,
+}
+
 /// A single game record (mirrors the C++ games table, trimmed down)
 #[derive(Debug, Clone, Default)]
 pub struct GameRecord {
@@ -86,6 +99,14 @@ pub trait GhostDb: Send + Sync {
     /// Check by name or IP (if ip is an empty string, only the name is queried)
     async fn ban_check(&self, server: &str, name: &str, ip: &str) -> DbResult<Option<BanRecord>>;
     async fn ban_list(&self, server: &str) -> DbResult<Vec<BanRecord>>;
+
+    /// Add or overwrite a mute (a repeat mute replaces the old expiry)
+    async fn mute_add(&self, mute: &MuteRecord) -> DbResult<bool>;
+    async fn mute_remove(&self, server: &str, name: &str) -> DbResult<bool>;
+    /// Return the mute only if it is still in effect at Unix time `now` (expired rows are ignored)
+    async fn mute_check(&self, server: &str, name: &str, now: u64) -> DbResult<Option<MuteRecord>>;
+    /// Every mute still in effect at Unix time `now`, ordered by name
+    async fn mute_list(&self, server: &str, now: u64) -> DbResult<Vec<MuteRecord>>;
 
     /// Write a game and its player roster, returning the game id (backends without auto-increment ids, e.g. Redis, return a serial number)
     async fn game_add(&self, game: &GameRecord, players: &[GamePlayerRecord]) -> DbResult<u64>;
