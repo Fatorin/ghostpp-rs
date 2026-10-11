@@ -1273,6 +1273,7 @@ impl GameActor {
                     self.handle_player_loaded(pid).await;
                 }
             }
+            // Also carries map chat commands as action 0x60 (see relay_chat), so muted players' -commands still work
             W3GS_OUTGOING_ACTION => {
                 if self.game_loaded {
                     if let Some(action) = GameProtocol::receive_w3gs_outgoing_action(data, pid) {
@@ -3132,7 +3133,11 @@ impl GameActor {
 
     /// Relay lobby chat: forward CHAT_TO_HOST as CHAT_FROM_HOST to the to_pids
     async fn relay_chat(&mut self, chat: IncomingChatPlayer) {
-        // !mute: a muted sender's message is not forwarded, unless the mute has just run out
+        // !mute: a muted sender's message is not forwarded, unless the mute has just run out.
+        // Only the chat text is dropped: map chat commands (DotA -ap, -swap, ...) do not fire from
+        // this packet but from action 0x60 "map trigger chat command" in W3GS_OUTGOING_ACTION, which
+        // is relayed to everyone regardless of mute — verified in a live game, they still work with
+        // no desync. Never filter actions by mute state, or map commands break.
         let (muted, expires) = self
             .players
             .get(&chat.from_pid)
